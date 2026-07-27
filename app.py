@@ -6,7 +6,7 @@ import io
 import base64
 import pandas as pd
 from datetime import date
-from PIL import Image
+from PIL import Image, ImageOps
 
 # Configuración principal de la app
 st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wide")
@@ -28,7 +28,7 @@ _ANOTADOR_HTML = """
     <button id="limpiar">🗑️ Borrar todo</button>
     <button id="guardar" class="guardar">💾 Guardar anotación</button>
   </div>
-  <canvas id="lienzo" width="600" height="350"></canvas>
+  <canvas id="lienzo" width="600" height="450"></canvas>
   <div id="estado"></div>
 </div>
 """
@@ -144,8 +144,16 @@ export default function(component) {
 
   if (data && data.imagen_base64 && parentElement._ultimaImagen !== data.imagen_base64) {
     parentElement._ultimaImagen = data.imagen_base64;
+    const canvasEl = parentElement.querySelector('#lienzo');
     const img = new Image();
-    img.onload = () => { parentElement._imagenFondo = img; parentElement._redibujar(); };
+    img.onload = () => {
+      // El lienzo toma EXACTAMENTE el ancho y alto reales de la foto,
+      // para que nunca se vea estirada/aplastada (antes era un tamaño fijo).
+      canvasEl.width = img.naturalWidth;
+      canvasEl.height = img.naturalHeight;
+      parentElement._imagenFondo = img;
+      parentElement._redibujar();
+    };
     img.src = "data:image/png;base64," + data.imagen_base64;
   }
 }
@@ -171,6 +179,22 @@ def anotador_fotos(imagen_base64_sin_prefijo, key):
         on_imagen_anotada_change=lambda: None
     )
     return resultado.imagen_anotada if resultado else None
+
+
+def redimensionar_conservando_calidad(img, max_lado=1400):
+    """
+    Redimensiona una foto manteniendo su proporción original (nunca la
+    distorsiona) y sin agrandar fotos pequeñas. max_lado controla el lado
+    más largo de la foto final: 1400px conserva buena nitidez para revisar
+    defectos, sin generar archivos gigantes que hagan lenta la app.
+    """
+    ancho, alto = img.size
+    escala = min(max_lado / max(ancho, alto), 1.0)
+    if escala >= 1.0:
+        return img
+    nuevo_ancho = max(1, int(ancho * escala))
+    nuevo_alto = max(1, int(alto * escala))
+    return img.resize((nuevo_ancho, nuevo_alto), Image.LANCZOS)
 
 
 def mostrar_imagen_responsive(ruta_o_objeto, caption=None):
@@ -429,8 +453,14 @@ def gestor_fotografico(label_foto, key_foto):
                 img_upload = Image.open(up_data)
 
         if img_upload is not None:
-            # Redimensionamos a un tamaño fijo de referencia
-            img_resized = img_upload.convert("RGB").resize((600, 350))
+            # 1) Corrige la rotación automática que guardan los celulares en
+            #    los metadatos EXIF (si no se hace esto, algunas fotos de
+            #    celular aparecen giradas o "aplastadas" al mostrarlas).
+            # 2) Redimensiona conservando la PROPORCIÓN ORIGINAL de la foto
+            #    (antes se forzaba siempre a 600x350, lo que distorsionaba
+            #    fotos verticales tomadas con el celular).
+            img_fija = ImageOps.exif_transpose(img_upload.convert("RGB"))
+            img_resized = redimensionar_conservando_calidad(img_fija, max_lado=1400)
             st.session_state[llave_img] = img_resized
             st.rerun()
 
@@ -445,7 +475,7 @@ def gestor_fotografico(label_foto, key_foto):
             st.rerun()
 
         buf = io.BytesIO()
-        img_actual.save(buf, format="PNG")
+        img_actual.save(buf, format="JPEG", quality=90)
         img_b64 = base64.b64encode(buf.getvalue()).decode()
 
         resultado = anotador_fotos(img_b64, key=f"anot_{key_foto}")
