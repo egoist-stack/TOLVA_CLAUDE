@@ -13,6 +13,25 @@ st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wi
 
 st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
 
+def mostrar_imagen_responsive(ruta_o_objeto, caption=None):
+    """
+    Muestra una imagen a ancho completo sin importar la version de Streamlit
+    instalada (el nombre del parametro para 'ancho completo' ha cambiado
+    varias veces entre versiones de Streamlit: use_column_width ->
+    use_container_width -> width='stretch'). Se prueba cada opcion en orden
+    hasta que una funcione.
+    """
+    try:
+        st.image(ruta_o_objeto, caption=caption, width="stretch")
+    except TypeError:
+        try:
+            st.image(ruta_o_objeto, caption=caption, use_container_width=True)
+        except TypeError:
+            try:
+                st.image(ruta_o_objeto, caption=caption, use_column_width=True)
+            except TypeError:
+                st.image(ruta_o_objeto, caption=caption)
+
 # --- BASE DE DATOS LOCAL PARA RECORDAR TOLVA ---
 DB_FILE = os.path.join("base_datos", "tolvas_db.json")
 
@@ -102,10 +121,10 @@ if pm in ["1000H", "2000H"]:
 # --- ESQUEMA VISUAL GENERAL ---
 if os.path.exists("esquema_tolva.png"):
     st.subheader("🗺️ Esquema Guía General de Zonas")
-    st.image("esquema_tolva.png", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_column_width=True)
+    mostrar_imagen_responsive("esquema_tolva.png", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC")
 elif os.path.exists("esquema_tolva.jpg"):
     st.subheader("🗺️ Esquema Guía General de Zonas")
-    st.image("esquema_tolva.jpg", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_column_width=True)
+    mostrar_imagen_responsive("esquema_tolva.jpg", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC")
 
 # --- CONFIGURACIÓN DE ESTRUCTURA DE ZONAS ---
 ESTRUCTURA_ZONAS = [
@@ -208,12 +227,12 @@ def mostrar_esquema_zona(nombres_archivo, titulo_zona):
     if rutas_existentes:
         st.markdown("**🗺️ Esquema de referencia de la zona:**")
         if len(rutas_existentes) == 1:
-            st.image(rutas_existentes[0], use_column_width=True)
+            mostrar_imagen_responsive(rutas_existentes[0])
         else:
             cols = st.columns(len(rutas_existentes))
             for c, ruta in zip(cols, rutas_existentes):
                 with c:
-                    st.image(ruta, use_column_width=True)
+                    mostrar_imagen_responsive(ruta)
         st.markdown("")
 
 # --- GESTOR FOTOGRÁFICO: SOLUCIÓN NATIVA CON BACKGROUND_IMAGE ---
