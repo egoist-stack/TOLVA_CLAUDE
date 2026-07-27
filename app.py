@@ -102,10 +102,10 @@ if pm in ["1000H", "2000H"]:
 # --- ESQUEMA VISUAL GENERAL ---
 if os.path.exists("esquema_tolva.png"):
     st.subheader("🗺️ Esquema Guía General de Zonas")
-    st.image("esquema_tolva.png", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_container_width=True)
+    st.image("esquema_tolva.png", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_column_width=True)
 elif os.path.exists("esquema_tolva.jpg"):
     st.subheader("🗺️ Esquema Guía General de Zonas")
-    st.image("esquema_tolva.jpg", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_container_width=True)
+    st.image("esquema_tolva.jpg", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_column_width=True)
 
 # --- CONFIGURACIÓN DE ESTRUCTURA DE ZONAS ---
 ESTRUCTURA_ZONAS = [
@@ -208,12 +208,12 @@ def mostrar_esquema_zona(nombres_archivo, titulo_zona):
     if rutas_existentes:
         st.markdown("**🗺️ Esquema de referencia de la zona:**")
         if len(rutas_existentes) == 1:
-            st.image(rutas_existentes[0], use_container_width=True)
+            st.image(rutas_existentes[0], use_column_width=True)
         else:
             cols = st.columns(len(rutas_existentes))
             for c, ruta in zip(cols, rutas_existentes):
                 with c:
-                    st.image(ruta, use_container_width=True)
+                    st.image(ruta, use_column_width=True)
         st.markdown("")
 
 # --- GESTOR FOTOGRÁFICO: SOLUCIÓN NATIVA CON BACKGROUND_IMAGE ---
