@@ -3,10 +3,11 @@ import json
 import os
 import hashlib
 import io
+import base64
 import pandas as pd
 from datetime import date
 from PIL import Image
-from streamlit_drawable_canvas import st_canvas
+from anotador_fotos import anotador_fotos
 
 # Configuración principal de la app
 st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wide")
@@ -235,18 +236,18 @@ def mostrar_esquema_zona(nombres_archivo, titulo_zona):
                     mostrar_imagen_responsive(ruta)
         st.markdown("")
 
-# --- GESTOR FOTOGRÁFICO: SOLUCIÓN NATIVA CON BACKGROUND_IMAGE ---
+# --- GESTOR FOTOGRÁFICO: COMPONENTE PROPIO (SIN LIBRERÍAS EXTERNAS) ---
 def gestor_fotografico(label_foto, key_foto):
     st.markdown(f"**{label_foto}**")
 
     llave_img = f"img_{key_foto}"
+    llave_anotada = f"{llave_img}_anotada"
 
     # Control para retomar foto
     if f"retomar_{key_foto}" in st.session_state and st.session_state[f"retomar_{key_foto}"]:
-        if llave_img in st.session_state: 
-            del st.session_state[llave_img]
-        if f"{llave_img}_hash" in st.session_state:
-            del st.session_state[f"{llave_img}_hash"]
+        for k in [llave_img, llave_anotada]:
+            if k in st.session_state:
+                del st.session_state[k]
         del st.session_state[f"retomar_{key_foto}"]
 
     # 1. CARGA DE LA IMAGEN
@@ -269,59 +270,31 @@ def gestor_fotografico(label_foto, key_foto):
                 img_upload = Image.open(up_data)
 
         if img_upload is not None:
-            # Redimensionamos a un tamaño fijo de referencia para que el canvas y la foto coincidan exactamente
+            # Redimensionamos a un tamaño fijo de referencia
             img_resized = img_upload.convert("RGB").resize((600, 350))
-
-            # Calculamos un hash del contenido de la imagen. Este hash se usa
-            # más abajo como parte de la "key" del canvas: es lo que obliga a
-            # streamlit-drawable-canvas a RE-MONTAR el componente cuando la
-            # foto cambia. Si la key no cambia, el componente asume que nada
-            # cambió y puede no repintar el background_image (bug conocido
-            # de la librería: no refresca el fondo si la key es estática).
-            buf = io.BytesIO()
-            img_resized.save(buf, format="PNG")
-            img_hash = hashlib.md5(buf.getvalue()).hexdigest()[:10]
-
             st.session_state[llave_img] = img_resized
-            st.session_state[f"{llave_img}_hash"] = img_hash
             st.rerun()
 
-    # 2. RENDERIZADO NATIVO DIRECTO (SIN TRUCOS CSS)
+    # 2. ANOTACIÓN: la imagen se incrusta directo en el HTML (base64), por eso
+    # no depende de una carga de recurso aparte y funciona igual en Streamlit
+    # Cloud que en local. Además soporta dibujo con el dedo en celular.
     if llave_img in st.session_state:
         img_actual = st.session_state[llave_img]
-        img_hash = st.session_state.get(f"{llave_img}_hash", "0")
 
-        col_tool, col_btn = st.columns([3, 1])
-        with col_tool:
-            herramienta = st.selectbox(
-                f"Herramienta ({label_foto}):", 
-                ["circle", "rect", "line", "freedraw"], 
-                format_func=lambda x: "⭕ Círculo / Elipse" if x=="circle" else ("🔲 Rectángulo" if x=="rect" else ("↗️ Flecha / Línea" if x=="line" else "✏️ Dibujo Libre")),
-                key=f"tool_{key_foto}"
-            )
-        with col_btn:
-            if st.button(f"🗑️ Retomar Foto", key=f"btn_retomar_{key_foto}"):
-                st.session_state[f"retomar_{key_foto}"] = True
-                st.rerun()
+        if st.button(f"🗑️ Retomar Foto", key=f"btn_retomar_{key_foto}"):
+            st.session_state[f"retomar_{key_foto}"] = True
+            st.rerun()
 
-        # SOLUCIÓN AL BUG DE DESINCRONIZACIÓN:
-        # La key incluye el hash de la imagen (no solo key_foto). Así, cada vez
-        # que se sube/toma una foto NUEVA, la key cambia y streamlit-drawable-canvas
-        # se re-monta desde cero con el fondo correcto. Mientras la foto no cambie
-        # (p.ej. solo cambias la herramienta de dibujo), la key se mantiene igual
-        # y el dibujo hecho por el usuario no se pierde.
-        st_canvas(
-            fill_color="rgba(255, 0, 0, 0.2)",
-            stroke_width=3,
-            stroke_color="#FF0000",
-            background_color="",
-            background_image=img_actual,
-            update_streamlit=True,
-            height=350,
-            width=600,
-            drawing_mode=herramienta,
-            key=f"canvas_{key_foto}_{img_hash}"
-        )
+        buf = io.BytesIO()
+        img_actual.save(buf, format="PNG")
+        img_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+        resultado = anotador_fotos(img_b64, ancho=600, alto=350, key=f"anot_{key_foto}")
+        if resultado:
+            st.session_state[llave_anotada] = resultado
+
+        if llave_anotada in st.session_state:
+            st.caption("✅ Anotación guardada para esta foto.")
 
 # --- PROCESAMIENTO Y DESPLIEGUE DE ZONAS ---
 todos_los_rechazos = [] 
