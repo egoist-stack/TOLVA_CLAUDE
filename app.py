@@ -7,12 +7,171 @@ import base64
 import pandas as pd
 from datetime import date
 from PIL import Image
-from anotador_fotos import anotador_fotos
 
 # Configuración principal de la app
 st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wide")
 
 st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
+
+# --- COMPONENTE DE ANOTACIÓN DE FOTOS (Streamlit Components v2) ---
+# Se registra UNA sola vez a nivel de módulo. Todo vive en este mismo
+# archivo (sin carpetas ni paquetes externos), y permite recibir de vuelta
+# la imagen anotada directamente, sin pasos de descargar/subir.
+_ANOTADOR_HTML = """
+<div>
+  <div id="barra" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+    <button data-tool="circle" class="sel">⭕ Círculo</button>
+    <button data-tool="rect">🔲 Rectángulo</button>
+    <button data-tool="line">↗️ Flecha</button>
+    <button data-tool="freedraw">✏️ Libre</button>
+    <button id="deshacer">↩️ Deshacer</button>
+    <button id="limpiar">🗑️ Borrar todo</button>
+    <button id="guardar" class="guardar">💾 Guardar anotación</button>
+  </div>
+  <canvas id="lienzo" width="600" height="350"></canvas>
+  <div id="estado"></div>
+</div>
+"""
+
+_ANOTADOR_CSS = """
+#barra button {
+  background:#262730; color:#fafafa; border:1px solid #555; border-radius:6px;
+  padding:7px 10px; font-size:13px; cursor:pointer;
+}
+#barra button:hover { background:#3a3b45; }
+#barra button.sel { background:#FF4B4B; border-color:#FF4B4B; }
+#barra button.guardar { background:#21c45d; border-color:#21c45d; font-weight:bold; }
+canvas { border:1px solid #444; width:100%; height:auto; touch-action:none; display:block; }
+#estado { font-size:12px; color:#9a9a9a; margin-top:4px; }
+"""
+
+_ANOTADOR_JS = """
+export default function(component) {
+  const { data, parentElement, setStateValue } = component;
+
+  if (!parentElement._anotadorInit) {
+    parentElement._anotadorInit = true;
+    parentElement._formas = [];
+    parentElement._herramienta = "circle";
+    parentElement._imagenFondo = null;
+
+    const canvas = parentElement.querySelector('#lienzo');
+    const ctx = canvas.getContext('2d');
+    const estadoEl = parentElement.querySelector('#estado');
+
+    function redibujar() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (parentElement._imagenFondo) ctx.drawImage(parentElement._imagenFondo, 0, 0, canvas.width, canvas.height);
+      const todas = parentElement._formas.concat(parentElement._formaActual ? [parentElement._formaActual] : []);
+      todas.forEach(dibujarForma);
+    }
+    function dibujarForma(f) {
+      if (!f) return;
+      ctx.lineWidth = 3; ctx.strokeStyle = "#FF0000"; ctx.fillStyle = "rgba(255,0,0,0.2)";
+      if (f.tipo === "circle") {
+        const cx=(f.x1+f.x2)/2, cy=(f.y1+f.y2)/2, rx=Math.abs(f.x2-f.x1)/2, ry=Math.abs(f.y2-f.y1)/2;
+        ctx.beginPath(); ctx.ellipse(cx,cy,rx,ry,0,0,2*Math.PI); ctx.fill(); ctx.stroke();
+      } else if (f.tipo === "rect") {
+        ctx.beginPath(); ctx.rect(f.x1,f.y1,f.x2-f.x1,f.y2-f.y1); ctx.fill(); ctx.stroke();
+      } else if (f.tipo === "line") {
+        const ang = Math.atan2(f.y2-f.y1, f.x2-f.x1);
+        ctx.beginPath(); ctx.moveTo(f.x1,f.y1); ctx.lineTo(f.x2,f.y2); ctx.stroke();
+        const t=12;
+        ctx.beginPath(); ctx.moveTo(f.x2,f.y2);
+        ctx.lineTo(f.x2-t*Math.cos(ang-Math.PI/6), f.y2-t*Math.sin(ang-Math.PI/6));
+        ctx.lineTo(f.x2-t*Math.cos(ang+Math.PI/6), f.y2-t*Math.sin(ang+Math.PI/6));
+        ctx.closePath(); ctx.fillStyle="#FF0000"; ctx.fill();
+      } else if (f.tipo === "freedraw") {
+        ctx.beginPath();
+        f.puntos.forEach((p,i)=> i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y));
+        ctx.stroke();
+      }
+    }
+    function coords(ev) {
+      const r = canvas.getBoundingClientRect();
+      const ex = ev.touches ? ev.touches[0].clientX : ev.clientX;
+      const ey = ev.touches ? ev.touches[0].clientY : ev.clientY;
+      return { x: (ex-r.left)*(canvas.width/r.width), y: (ey-r.top)*(canvas.height/r.height) };
+    }
+    function iniciar(ev) {
+      ev.preventDefault();
+      parentElement._dibujando = true;
+      const {x,y} = coords(ev);
+      parentElement._formaActual = parentElement._herramienta === "freedraw"
+        ? {tipo:"freedraw",puntos:[{x,y}]}
+        : {tipo:parentElement._herramienta,x1:x,y1:y,x2:x,y2:y};
+    }
+    function mover(ev) {
+      if (!parentElement._dibujando) return;
+      ev.preventDefault();
+      const {x,y} = coords(ev);
+      if (parentElement._herramienta === "freedraw") parentElement._formaActual.puntos.push({x,y});
+      else { parentElement._formaActual.x2 = x; parentElement._formaActual.y2 = y; }
+      redibujar();
+    }
+    function terminar() {
+      if (!parentElement._dibujando) return;
+      parentElement._dibujando = false;
+      if (parentElement._formaActual) parentElement._formas.push(parentElement._formaActual);
+      parentElement._formaActual = null;
+      redibujar();
+      estadoEl.textContent = "Sin guardar todavía";
+    }
+
+    canvas.addEventListener("mousedown", iniciar);
+    canvas.addEventListener("mousemove", mover);
+    window.addEventListener("mouseup", terminar);
+    canvas.addEventListener("touchstart", iniciar, {passive:false});
+    canvas.addEventListener("touchmove", mover, {passive:false});
+    canvas.addEventListener("touchend", terminar);
+
+    parentElement.querySelectorAll('#barra button[data-tool]').forEach((btn) => {
+      btn.addEventListener("click", () => {
+        parentElement.querySelectorAll('#barra button[data-tool]').forEach((b) => b.classList.remove("sel"));
+        btn.classList.add("sel");
+        parentElement._herramienta = btn.dataset.tool;
+      });
+    });
+    parentElement.querySelector('#deshacer').addEventListener("click", () => { parentElement._formas.pop(); redibujar(); });
+    parentElement.querySelector('#limpiar').addEventListener("click", () => { parentElement._formas = []; redibujar(); });
+    parentElement.querySelector('#guardar').addEventListener("click", () => {
+      setStateValue('imagen_anotada', canvas.toDataURL('image/png'));
+      estadoEl.textContent = "✅ Anotación guardada";
+    });
+
+    parentElement._redibujar = redibujar;
+  }
+
+  if (data && data.imagen_base64 && parentElement._ultimaImagen !== data.imagen_base64) {
+    parentElement._ultimaImagen = data.imagen_base64;
+    const img = new Image();
+    img.onload = () => { parentElement._imagenFondo = img; parentElement._redibujar(); };
+    img.src = "data:image/png;base64," + data.imagen_base64;
+  }
+}
+"""
+
+_componente_anotador = st.components.v2.component(
+    "anotador_fotos_tolva",
+    html=_ANOTADOR_HTML,
+    css=_ANOTADOR_CSS,
+    js=_ANOTADOR_JS,
+)
+
+
+def anotador_fotos(imagen_base64_sin_prefijo, key):
+    """
+    Muestra el lienzo de anotación para una foto y devuelve la imagen ya
+    anotada (string base64) en cuanto el usuario presiona "Guardar
+    anotación". Devuelve None mientras no se haya guardado.
+    """
+    resultado = _componente_anotador(
+        data={"imagen_base64": imagen_base64_sin_prefijo},
+        key=key,
+        on_imagen_anotada_change=lambda: None
+    )
+    return resultado.imagen_anotada if resultado else None
+
 
 def mostrar_imagen_responsive(ruta_o_objeto, caption=None):
     """
@@ -287,9 +446,9 @@ def gestor_fotografico(label_foto, key_foto):
 
         buf = io.BytesIO()
         img_actual.save(buf, format="PNG")
-        img_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
 
-        resultado = anotador_fotos(img_b64, ancho=600, alto=350, key=f"anot_{key_foto}")
+        resultado = anotador_fotos(img_b64, key=f"anot_{key_foto}")
         if resultado:
             st.session_state[llave_anotada] = resultado
 
