@@ -20,7 +20,8 @@ st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
 _ANOTADOR_HTML = """
 <div>
   <div id="barra" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
-    <button data-tool="circle" class="sel">⭕ Círculo</button>
+    <button data-tool="none" class="sel">🚫 Ninguno</button>
+    <button data-tool="circle">⭕ Círculo</button>
     <button data-tool="rect">🔲 Rectángulo</button>
     <button data-tool="line">↗️ Flecha</button>
     <button data-tool="freedraw">✏️ Libre</button>
@@ -52,7 +53,7 @@ export default function(component) {
   if (!parentElement._anotadorInit) {
     parentElement._anotadorInit = true;
     parentElement._formas = [];
-    parentElement._herramienta = "circle";
+    parentElement._herramienta = "none";
     parentElement._imagenFondo = null;
 
     const canvas = parentElement.querySelector('#lienzo');
@@ -94,6 +95,7 @@ export default function(component) {
       return { x: (ex-r.left)*(canvas.width/r.width), y: (ey-r.top)*(canvas.height/r.height) };
     }
     function iniciar(ev) {
+      if (parentElement._herramienta === "none") return; // no bloquea el deslizar/scroll
       ev.preventDefault();
       parentElement._dibujando = true;
       const {x,y} = coords(ev);
@@ -179,6 +181,153 @@ def anotador_fotos(imagen_base64_sin_prefijo, key):
         on_imagen_anotada_change=lambda: None
     )
     return resultado.imagen_anotada if resultado else None
+
+
+# --- COMPONENTE DE CÁMARA CON ZOOM NATIVO ---
+# Reemplaza el widget estándar st.camera_input (que no permite zoom) por una
+# cámara propia con control de zoom real de hardware (cuando el navegador lo
+# soporta) y respaldo con pellizco/deslizador para acercar digitalmente.
+_CAMARA_HTML = """
+<div>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="controlesZoom" style="display:none;">
+    <span>🔍</span>
+    <input type="range" id="zoomSlider" min="1" max="8" step="0.1" value="1">
+    <span id="zoomValor">1.0x</span>
+  </div>
+  <div style="display:flex;gap:8px;margin-top:8px;">
+    <button id="btnCapturar" class="capturar">📸 Capturar Foto</button>
+  </div>
+  <div id="estadoCam" style="font-size:12px;color:#9a9a9a;margin-top:4px;"></div>
+</div>
+"""
+
+_CAMARA_CSS = """
+video { width:100%; border-radius:8px; background:#000; touch-action:none; display:block; }
+#controlesZoom { display:flex; align-items:center; gap:8px; margin-top:6px; color:#fafafa; font-size:13px; }
+#controlesZoom input[type=range] { flex:1; }
+button.capturar {
+  background:#21c45d; color:#fff; border:none; border-radius:6px;
+  padding:10px 16px; font-size:14px; font-weight:bold; cursor:pointer;
+}
+"""
+
+_CAMARA_JS = """
+export default function(component) {
+  const { parentElement, setStateValue } = component;
+  if (parentElement._camInit) return;
+  parentElement._camInit = true;
+
+  const video = parentElement.querySelector('#video');
+  const estadoEl = parentElement.querySelector('#estadoCam');
+  const controlesZoom = parentElement.querySelector('#controlesZoom');
+  const zoomSlider = parentElement.querySelector('#zoomSlider');
+  const zoomValor = parentElement.querySelector('#zoomValor');
+  let track = null;
+  let usaZoomHardware = false;
+  let zoomDigital = 1;
+
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    audio: false
+  }).then((stream) => {
+    video.srcObject = stream;
+    track = stream.getVideoTracks()[0];
+    const capacidades = track.getCapabilities ? track.getCapabilities() : {};
+    if (capacidades.zoom) {
+      usaZoomHardware = true;
+      zoomSlider.min = capacidades.zoom.min;
+      zoomSlider.max = capacidades.zoom.max;
+      zoomSlider.step = capacidades.zoom.step || 0.1;
+      zoomSlider.value = capacidades.zoom.min;
+      controlesZoom.style.display = "flex";
+    } else {
+      // Respaldo: zoom digital con CSS si el navegador no expone zoom de hardware
+      controlesZoom.style.display = "flex";
+    }
+    estadoEl.textContent = "Cámara lista";
+  }).catch((err) => {
+    estadoEl.textContent = "⚠️ No se pudo abrir la cámara: " + err.message;
+  });
+
+  function aplicarZoom(valor) {
+    if (usaZoomHardware && track) {
+      track.applyConstraints({ advanced: [{ zoom: parseFloat(valor) }] }).catch(() => {});
+    } else {
+      zoomDigital = parseFloat(valor);
+      video.style.transform = "scale(" + zoomDigital + ")";
+    }
+    zoomValor.textContent = parseFloat(valor).toFixed(1) + "x";
+  }
+  zoomSlider.addEventListener("input", (ev) => aplicarZoom(ev.target.value));
+
+  // Pellizco con dos dedos sobre la vista previa
+  let distanciaInicial = null, zoomInicial = 1;
+  video.addEventListener("touchstart", (ev) => {
+    if (ev.touches.length === 2) {
+      distanciaInicial = Math.hypot(
+        ev.touches[0].clientX - ev.touches[1].clientX,
+        ev.touches[0].clientY - ev.touches[1].clientY
+      );
+      zoomInicial = parseFloat(zoomSlider.value);
+    }
+  }, { passive: true });
+  video.addEventListener("touchmove", (ev) => {
+    if (ev.touches.length === 2 && distanciaInicial) {
+      const distanciaActual = Math.hypot(
+        ev.touches[0].clientX - ev.touches[1].clientX,
+        ev.touches[0].clientY - ev.touches[1].clientY
+      );
+      const factor = distanciaActual / distanciaInicial;
+      let nuevoZoom = zoomInicial * factor;
+      const min = parseFloat(zoomSlider.min), max = parseFloat(zoomSlider.max);
+      nuevoZoom = Math.max(min, Math.min(max, nuevoZoom));
+      zoomSlider.value = nuevoZoom;
+      aplicarZoom(nuevoZoom);
+    }
+  }, { passive: true });
+
+  parentElement.querySelector('#btnCapturar').addEventListener("click", () => {
+    const lienzoCaptura = document.createElement("canvas");
+    if (usaZoomHardware || zoomDigital === 1) {
+      lienzoCaptura.width = video.videoWidth;
+      lienzoCaptura.height = video.videoHeight;
+      lienzoCaptura.getContext("2d").drawImage(video, 0, 0);
+    } else {
+      // Recorta digitalmente la zona ampliada (zoom digital de respaldo)
+      const anchoRecorte = video.videoWidth / zoomDigital;
+      const altoRecorte = video.videoHeight / zoomDigital;
+      const x = (video.videoWidth - anchoRecorte) / 2;
+      const y = (video.videoHeight - altoRecorte) / 2;
+      lienzoCaptura.width = anchoRecorte;
+      lienzoCaptura.height = altoRecorte;
+      lienzoCaptura.getContext("2d").drawImage(video, x, y, anchoRecorte, altoRecorte, 0, 0, anchoRecorte, altoRecorte);
+    }
+    const resultado = lienzoCaptura.toDataURL("image/jpeg", 0.92);
+    setStateValue("foto_capturada", resultado);
+    estadoEl.textContent = "✅ Foto capturada";
+    if (track) track.stop();
+  });
+}
+"""
+
+_componente_camara = st.components.v2.component(
+    "camara_nativa_tolva",
+    html=_CAMARA_HTML,
+    css=_CAMARA_CSS,
+    js=_CAMARA_JS,
+)
+
+
+def camara_nativa(key):
+    """
+    Cámara propia con zoom (usa el zoom de hardware del celular cuando el
+    navegador lo permite; si no, hace zoom digital con pellizco/deslizador).
+    Devuelve la foto capturada (string base64 con prefijo data:image/jpeg)
+    o None mientras no se haya capturado nada.
+    """
+    resultado = _componente_camara(key=key, on_foto_capturada_change=lambda: None)
+    return resultado.foto_capturada if resultado else None
 
 
 def redimensionar_conservando_calidad(img, max_lado=1400):
@@ -444,9 +593,11 @@ def gestor_fotografico(label_foto, key_foto):
         
         img_upload = None
         if metodo == "Cámara Directa":
-            cam_data = st.camera_input(f"Tomar {label_foto}", key=f"cam_{key_foto}")
-            if cam_data:
-                img_upload = Image.open(cam_data)
+            foto_b64 = camara_nativa(key=f"camnat_{key_foto}")
+            if foto_b64:
+                # foto_b64 viene como "data:image/jpeg;base64,XXXX"
+                datos_binarios = base64.b64decode(foto_b64.split(",", 1)[1])
+                img_upload = Image.open(io.BytesIO(datos_binarios))
         else:
             up_data = st.file_uploader(f"Subir {label_foto}", type=["jpg", "png", "jpeg"], key=f"up_{key_foto}")
             if up_data:
