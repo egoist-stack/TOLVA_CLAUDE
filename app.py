@@ -42,7 +42,7 @@ _ANOTADOR_CSS = """
 #barra button:hover { background:#3a3b45; }
 #barra button.sel { background:#FF4B4B; border-color:#FF4B4B; }
 #barra button.guardar { background:#21c45d; border-color:#21c45d; font-weight:bold; }
-canvas { border:1px solid #444; width:100%; height:auto; touch-action:none; display:block; }
+canvas { border:1px solid #444; width:100%; height:auto; touch-action:pan-y; display:block; }
 #estado { font-size:12px; color:#9a9a9a; margin-top:4px; }
 """
 
@@ -132,6 +132,7 @@ export default function(component) {
         parentElement.querySelectorAll('#barra button[data-tool]').forEach((b) => b.classList.remove("sel"));
         btn.classList.add("sel");
         parentElement._herramienta = btn.dataset.tool;
+        canvas.style.touchAction = (btn.dataset.tool === "none") ? "pan-y" : "none";
       });
     });
     parentElement.querySelector('#deshacer').addEventListener("click", () => { parentElement._formas.pop(); redibujar(); });
@@ -662,37 +663,44 @@ for idx_z, bloque_zona in enumerate(ESTRUCTURA_ZONAS):
 
         c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([0.6, 2.2, 1.2, 0.8, 1.0, 1.0, 1.0, 1.2, 1.2])
 
-        with c1: st.write(f"**{cod_z}**")
-        with c2: st.write(desc_z)
-        with c3: st.write(fecha_insp.strftime("%d/%m/%Y"))
+        with c1:
+            st.caption("ZONA")
+            st.write(f"**{cod_z}**")
+        with c2:
+            st.caption("DESCRIPCIÓN")
+            st.write(desc_z)
+        with c3:
+            st.caption("FECHA")
+            st.write(fecha_insp.strftime("%d/%m/%Y"))
 
         with c4:
-            defecto = st.selectbox("", ["LF", "D", "DE", "DP", "F", "FA"], key=f"def_{key_id}", label_visibility="collapsed")
+            defecto = st.selectbox("DEFECTO", ["LF", "D", "DE", "DP", "F", "FA"], key=f"def_{key_id}")
 
         es_lf = (defecto == "LF")
 
         with c5:
             if es_lf:
                 longitud = "-"
-                st.text_input("", value="-", disabled=True, key=f"long_{key_id}", label_visibility="collapsed")
+                st.text_input("LONG. (mm)", value="-", disabled=True, key=f"long_{key_id}")
             else:
-                opc_long = st.selectbox("", ["Manual", "VARIOS"], key=f"opclong_{key_id}", label_visibility="collapsed")
+                opc_long = st.selectbox("LONG. (mm)", ["Manual", "VARIOS"], key=f"opclong_{key_id}")
                 if opc_long == "VARIOS":
                     longitud = "VARIOS"
                 else:
-                    longitud = st.text_input("", value="100", key=f"longval_{key_id}", label_visibility="collapsed")
+                    longitud = st.text_input("Valor longitud", value="100", key=f"longval_{key_id}")
 
         with c6:
             if es_lf:
                 est_post = "-"
-                st.selectbox("", ["-"], disabled=True, key=f"est_{key_id}", label_visibility="collapsed")
+                st.selectbox("EST. POST.", ["-"], disabled=True, key=f"est_{key_id}")
             else:
-                est_post = st.selectbox("", ["NR", "R"], key=f"est_{key_id}", label_visibility="collapsed")
+                est_post = st.selectbox("EST. POST.", ["NR", "R"], key=f"est_{key_id}")
 
         with c7:
-            tecnica = st.selectbox("", ["VT", "VT/PT", "VT/UT"], index=2 if tec_def=="VT/UT" else 0, key=f"tec_{key_id}", label_visibility="collapsed")
+            tecnica = st.selectbox("TÉCNICA", ["VT", "VT/PT", "VT/UT"], index=2 if tec_def=="VT/UT" else 0, key=f"tec_{key_id}")
 
         with c8:
+            st.caption("CONDICIÓN")
             if es_lf:
                 condicion = "ACEPTABLE"
                 st.markdown("<span style='color:#48BB78; font-weight:bold;'>ACEPTABLE</span>", unsafe_allow_html=True)
@@ -703,9 +711,9 @@ for idx_z, bloque_zona in enumerate(ESTRUCTURA_ZONAS):
         with c9:
             if es_lf:
                 comentario = "-"
-                st.text_input("", value="-", disabled=True, key=f"com_{key_id}", label_visibility="collapsed")
+                st.text_input("COMENTARIOS", value="-", disabled=True, key=f"com_{key_id}")
             else:
-                comentario = st.selectbox("", ["CREAR OT", "OT CREADA"], key=f"com_{key_id}", label_visibility="collapsed")
+                comentario = st.selectbox("COMENTARIOS", ["CREAR OT", "OT CREADA"], key=f"com_{key_id}")
 
         if not es_lf:
             datos_defectuosos = {
