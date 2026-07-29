@@ -7,11 +7,14 @@ import re
 import pandas as pd
 from datetime import date
 from PIL import Image, ImageOps
+from openpyxl.styles import Font
 
 # Configuración principal de la app
 st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wide")
 
 st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
+
+st.info("💡 **IMPORTANTE:** Asegúrate de que tu archivo `plantilla_tolva.xlsx` en GitHub esté **completamente vacío de fotos**. Si la plantilla tiene fotos de ejemplo, bórralas y vuelve a subirla, de lo contrario se mezclarán con las que tomes aquí.")
 
 # --- COMPONENTE DE ANOTACIÓN DE FOTOS ---
 _ANOTADOR_HTML = """
@@ -332,6 +335,9 @@ def _copiar_estilo_bloque(ws, fila_ini_origen, fila_fin_origen, fila_ini_destino
         dim_o = ws.row_dimensions.get(fila_o)
         if dim_o and dim_o.height:
             ws.row_dimensions[fila_d].height = dim_o.height
+        else:
+            ws.row_dimensions[fila_d].height = 180 # Aseguramos que la celda no sea minúscula
+            
         for col in range(1, max_col + 1):
             c_o = ws.cell(row=fila_o, column=col)
             c_d = ws.cell(row=fila_d, column=col)
@@ -372,12 +378,14 @@ def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
+    # Margen de seguridad de ~3 milímetros (100000 EMUs) para NO INVADIR las líneas de la tabla
+    margen = 100000
     return (
         f'<xdr:twoCellAnchor editAs="oneCell">'
-        f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>38100</xdr:colOff>'
-        f'<xdr:row>{fila_0idx}</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
-        f'<xdr:to><xdr:col>{col_0idx + col_span}</xdr:col><xdr:colOff>0</xdr:colOff>'
-        f'<xdr:row>{fila_0idx + row_span}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
+        f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>{margen}</xdr:colOff>'
+        f'<xdr:row>{fila_0idx}</xdr:row><xdr:rowOff>{margen}</xdr:rowOff></xdr:from>'
+        f'<xdr:to><xdr:col>{col_0idx + col_span}</xdr:col><xdr:colOff>-{margen}</xdr:colOff>'
+        f'<xdr:row>{fila_0idx + row_span}</xdr:row><xdr:rowOff>-{margen}</xdr:rowOff></xdr:to>'
         f'<xdr:pic>'
         f'<xdr:nvPicPr><xdr:cNvPr id="{id_imagen}" name="FotoApp{id_imagen}"/>'
         f'<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
@@ -388,6 +396,16 @@ def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_s
         f'</xdr:pic><xdr:clientData/></xdr:twoCellAnchor>'
     )
 
+def obtener_img_state(llave):
+    foto_anotada = st.session_state.get(f"{llave}_anotada")
+    foto_original = st.session_state.get(llave)
+    if foto_anotada:
+        datos_bin = base64.b64decode(foto_anotada.split(",", 1)[1])
+        return Image.open(io.BytesIO(datos_bin))
+    elif foto_original is not None:
+        return foto_original
+    return None
+
 def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo,
                            cod_tolva, horometro, cod_informe, revision, pm,
                            estructura_zonas, nombre_realizado, fecha_firma, firma_archivo,
@@ -395,9 +413,13 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     
     import openpyxl
     import zipfile
+    from openpyxl.styles import Font
 
     wb = openpyxl.load_workbook(ruta_plantilla)
     ws = wb["TOLVA DT"]
+    
+    font_black = Font(color="000000")
+    font_red = Font(color="FF0000", bold=True)
 
     ws["C5"] = cliente
     ws["C6"] = lugar
@@ -474,14 +496,16 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             ws.cell(row=fila, column=11, value=tecnica)
             ws.cell(row=fila, column=12, value=condicion)
             ws.cell(row=fila, column=14, value=comentario)
+            
+            # SOLUCION DE RAIZ: Color Rojo si hay defecto, Negro si es Aceptable.
+            for c_idx in [1, 2, 5, 7, 8, 9, 11, 12, 14]:
+                try:
+                    ws.cell(row=fila, column=c_idx).font = font_black if es_lf else font_red
+                except:
+                    pass
 
+        # Filtrar solo defectos de esta zona (excluyendo letreros fijos)
         rechazos_zona = [r for r in todos_los_rechazos if r["key_id"].startswith(f"z{idx_z}_")]
-        
-        if idx_z == 1:
-            rechazos_zona.append({"zona": "2", "descripcion": "LETRERO LATERAL RH", "defecto": "-", "key_id": "esp_z2_rh"})
-            rechazos_zona.append({"zona": "2", "descripcion": "LETRERO LATERAL LH", "defecto": "-", "key_id": "esp_z2_lh"})
-        elif idx_z == 5:
-            rechazos_zona.append({"zona": "8", "descripcion": "LETRERO POSTERIOR", "defecto": "-", "key_id": "esp_z8_post"})
 
         fila_marcador = _FILAS_MARCADOR_FOTOS_EXCEL[idx_z] + desplazamiento
         bloques = _obtener_bloques_fotos(ws, fila_marcador)
@@ -499,28 +523,25 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         for idx_b, (fila_ini, fila_fin) in enumerate(bloques):
             if idx_b >= len(rechazos_zona):
                 break
+            
+            # Asegurar altura digna para fotos nuevas
+            for r_h in range(fila_ini, fila_fin + 1):
+                if ws.row_dimensions[r_h].height is None or ws.row_dimensions[r_h].height < 80:
+                    ws.row_dimensions[r_h].height = 120
+
             rechazo = rechazos_zona[idx_b]
             key_id = rechazo["key_id"]
 
             texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
-            ws.cell(row=fila_ini, column=1, value=texto_desc)
+            try:
+                ws.cell(row=fila_ini, column=1, value=texto_desc)
+            except: pass
 
             alto_bloque = fila_fin - fila_ini + 1
 
-            for prefijo_foto, col_0idx, col_span in (
-                ("pano", 4, 7), 
-                ("det", 11, 6)
-            ):
+            for prefijo_foto, col_0idx, col_span in (("pano", 4, 7), ("det", 11, 6)):
                 llave_base = f"img_{prefijo_foto}_{key_id}"
-                foto_anotada = st.session_state.get(f"{llave_base}_anotada")
-                foto_original = st.session_state.get(llave_base)
-                
-                img_foto = None
-                if foto_anotada:
-                    datos_bin = base64.b64decode(foto_anotada.split(",", 1)[1])
-                    img_foto = Image.open(io.BytesIO(datos_bin))
-                elif foto_original is not None:
-                    img_foto = foto_original
+                img_foto = obtener_img_state(llave_base)
                     
                 if img_foto is not None:
                     bytes_png = _preparar_imagen_para_insertar(img_foto)
@@ -533,16 +554,52 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     })
                 else:
                     if prefijo_foto == "det" and key_id.startswith("esp_"):
-                        # BLOQUE DE SEGURIDAD APLICADO AQUI PARA EVITAR EL CRASHEO
-                        try:
-                            ws.cell(row=fila_ini, column=12, value="-")
-                        except AttributeError:
-                            pass
-                        try:
-                            ws.cell(row=fila_ini, column=11, value="-")
-                        except AttributeError:
-                            pass
+                        try: ws.cell(row=fila_ini, column=12, value="-")
+                        except AttributeError: pass
 
+    # --- RASTREADOR Y ASIGNADOR DE FOTOS FIJAS (ZONAS 2 Y 8) ---
+    # Solución de raíz: Buscar la celda exacta en la plantilla donde ya dice Letrero Lateral, etc.
+    fotos_fijas_obligatorias = [
+        ("LETRERO LATERAL RH", "esp_z2_rh"),
+        ("LETRERO LATERAL LH", "esp_z2_lh"),
+        ("LETRERO POSTERIOR", "esp_z8_post")
+    ]
+    
+    for texto_buscar, llave_fija in fotos_fijas_obligatorias:
+        for r_search in range(1, 250):
+            val_search = str(ws.cell(row=r_search, column=1).value).upper()
+            if texto_buscar in val_search:
+                
+                # Averiguar el alto del bloque fijo escaneando las celdas combinadas de Panorámico (Columna E)
+                row_span_pano = 1
+                for mc in ws.merged_cells.ranges:
+                    if mc.min_row == r_search and mc.min_col == 5:
+                        row_span_pano = mc.max_row - mc.min_row + 1
+                        break
+                        
+                img_pano = obtener_img_state(f"img_pano_{llave_fija}")
+                if img_pano:
+                    fotos_pendientes.append({
+                        "fila_0idx": r_search - 1, "col_0idx": 4, 
+                        "col_span": 7, "row_span": row_span_pano,
+                        "bytes_png": _preparar_imagen_para_insertar(img_pano)
+                    })
+                
+                img_det = obtener_img_state(f"img_det_{llave_fija}")
+                if img_det:
+                    fotos_pendientes.append({
+                        "fila_0idx": r_search - 1, "col_0idx": 11, 
+                        "col_span": 6, "row_span": row_span_pano,
+                        "bytes_png": _preparar_imagen_para_insertar(img_det)
+                    })
+                else:
+                    try: ws.cell(row=r_search, column=12, value="-")
+                    except AttributeError: pass
+                    try: ws.cell(row=r_search, column=11, value="-")
+                    except AttributeError: pass
+                break
+
+    # --- ZONAS A REPARAR (OTs) ---
     fila_ot = 252 + desplazamiento
     fila_ot_max = 259 + desplazamiento
     for idx_ot, rechazo in enumerate(todos_los_rechazos):
@@ -553,14 +610,17 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         codigo_sugerido = f"BK00{str(idx_ot + 1).zfill(5)}"
         codigo_backlog = st.session_state.get(f"bk_{rechazo['key_id']}", codigo_sugerido)
         texto_ot = f"{prefijo} {rechazo['descripcion']} ({rechazo['zona']}) - {codigo_backlog}"
-        ws.cell(row=fila_ot, column=1, value=texto_ot)
+        try: ws.cell(row=fila_ot, column=1, value=texto_ot)
+        except: pass
         fila_ot += 1
 
     fila_nombre = 261 + desplazamiento
     fila_firma = 264 + desplazamiento
     fila_fecha = 266 + desplazamiento
-    ws.cell(row=fila_nombre, column=2, value=nombre_realizado)
-    ws.cell(row=fila_fecha, column=2, value=fecha_firma)
+    try: ws.cell(row=fila_nombre, column=2, value=nombre_realizado)
+    except: pass
+    try: ws.cell(row=fila_fecha, column=2, value=fecha_firma)
+    except: pass
 
     if firma_archivo is not None:
         firma_archivo.seek(0)
@@ -589,13 +649,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     
     z_original = zipfile.ZipFile(ruta_plantilla)
     
-    # 1. Recuperar la etiqueta <drawing> original intacta
     sheet1_original = z_original.read('xl/worksheets/sheet1.xml').decode('utf-8')
     match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', sheet1_original)
     if not match_drawing:
         match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', sheet1_original)
 
-    # 2. Reemplazarla en la nueva hoja generada
     for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml']:
         if nombre in z_temp.namelist():
             xml_data = z_temp.read(nombre).decode('utf-8')
@@ -603,15 +661,14 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 xml_data = re.sub(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', '', xml_data)
                 xml_data = re.sub(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', '', xml_data)
                 if match_drawing:
-                    # REPARACIÓN CRÍTICA DEL XML PARA EXCEL: Asegurar prefijo xmlns:r
                     tag_drawing = match_drawing.group(0)
+                    # Forzar declaración de prefijo R para evitar corrupción
                     if 'xmlns:r=' not in tag_drawing:
                         tag_drawing = tag_drawing.replace('r:id=', 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id=')
                     xml_data = xml_data.replace('</worksheet>', tag_drawing + '</worksheet>')
                     
             partes_nuevas[nombre] = xml_data.encode('utf-8')
 
-    # 3. Procesar las fotos nuevas en el archivo de dibujos original
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
 
@@ -653,8 +710,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     buf_final = io.BytesIO()
     with zipfile.ZipFile(buf_final, 'w', zipfile.ZIP_DEFLATED) as z_final:
         for item in z_original.infolist():
-            # ELIMINAR calcChain.xml para evitar error de desincronización de fórmulas al abrir
-            if item.filename == 'xl/calcChain.xml':
+            if item.filename == 'xl/calcChain.xml': # Purgar para evitar errores de formula
                 continue
             datos = partes_nuevas.get(item.filename, z_original.read(item.filename))
             z_final.writestr(item, datos)
@@ -911,6 +967,7 @@ def mostrar_esquema_zona(nombres_archivo, titulo_zona):
 # --- GESTOR FOTOGRÁFICO ---
 def gestor_fotografico(label_foto, key_foto):
     st.markdown(f"**{label_foto}**")
+    st.warning("⚠️ Recuerda hacer clic en '💾 Guardar anotación' en el lienzo si realizas trazos antes de generar el reporte.")
 
     llave_img = f"img_{key_foto}"
     llave_anotada = f"{llave_img}_anotada"
@@ -962,7 +1019,7 @@ def gestor_fotografico(label_foto, key_foto):
             st.session_state[llave_anotada] = resultado
 
         if llave_anotada in st.session_state:
-            st.caption("✅ Anotación guardada para esta foto.")
+            st.caption("✅ Anotación guardada en memoria.")
 
 # --- PROCESAMIENTO Y DESPLIEGUE DE ZONAS ---
 todos_los_rechazos = [] 
