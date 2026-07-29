@@ -372,7 +372,6 @@ def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
-    # Sin offsets negativos para evitar conflictos de corrupción en Excel
     return (
         f'<xdr:twoCellAnchor editAs="oneCell">'
         f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>38100</xdr:colOff>'
@@ -410,7 +409,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P6"] = revision
     ws["P7"] = pm
 
-    # --- MEDICIÓN DE ESPESORES (BÚSQUEDA AUTOMÁTICA) ---
+    # --- MEDICIÓN DE ESPESORES ---
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
         fila_inicio_matriz = 15 
         col_inicio_matriz = 3   
@@ -534,6 +533,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     })
                 else:
                     if prefijo_foto == "det" and key_id.startswith("esp_"):
+                        # BLOQUE DE SEGURIDAD APLICADO AQUI PARA EVITAR EL CRASHEO
                         try:
                             ws.cell(row=fila_ini, column=12, value="-")
                         except AttributeError:
@@ -589,11 +589,13 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     
     z_original = zipfile.ZipFile(ruta_plantilla)
     
+    # 1. Recuperar la etiqueta <drawing> original intacta
     sheet1_original = z_original.read('xl/worksheets/sheet1.xml').decode('utf-8')
     match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', sheet1_original)
     if not match_drawing:
         match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', sheet1_original)
 
+    # 2. Reemplazarla en la nueva hoja generada
     for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml']:
         if nombre in z_temp.namelist():
             xml_data = z_temp.read(nombre).decode('utf-8')
@@ -601,19 +603,15 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 xml_data = re.sub(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', '', xml_data)
                 xml_data = re.sub(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', '', xml_data)
                 if match_drawing:
-                    xml_data = xml_data.replace('</worksheet>', match_drawing.group(0) + '</worksheet>')
-                
-                # PARCHE CRITICO PARA EVITAR ERROR XML EN EXCEL DE "PREFIJO NO DECLARADO"
-                if 'xmlns:x14=' not in xml_data:
-                    namespaces = (
-                        ' xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"'
-                        ' xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"'
-                        ' xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"'
-                    )
-                    xml_data = re.sub(r'<worksheet([^>]*)>', lambda m: '<worksheet' + m.group(1) + namespaces + '>', xml_data, count=1)
-
+                    # REPARACIÓN CRÍTICA DEL XML PARA EXCEL: Asegurar prefijo xmlns:r
+                    tag_drawing = match_drawing.group(0)
+                    if 'xmlns:r=' not in tag_drawing:
+                        tag_drawing = tag_drawing.replace('r:id=', 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id=')
+                    xml_data = xml_data.replace('</worksheet>', tag_drawing + '</worksheet>')
+                    
             partes_nuevas[nombre] = xml_data.encode('utf-8')
 
+    # 3. Procesar las fotos nuevas en el archivo de dibujos original
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
 
@@ -1179,4 +1177,3 @@ else:
                         "Mientras tanto, puedes abrir el Excel descargado y usar "
                         "'Archivo > Exportar > Crear PDF/XPS' desde Excel o Google Sheets."
                     )
-                  
