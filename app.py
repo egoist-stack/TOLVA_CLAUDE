@@ -356,30 +356,12 @@ def _obtener_bloques_fotos(ws, fila_marcador):
         fila_actual = rango_encontrado[1] + 1
     return bloques
 
-def _ancho_columnas_px(ws, col_ini, col_fin):
-    from openpyxl.utils import get_column_letter
-    total = 0
-    for col in range(col_ini, col_fin + 1):
-        letra = get_column_letter(col)
-        dim = ws.column_dimensions.get(letra)
-        ancho_unidades = dim.width if (dim and dim.width) else 8.43
-        total += ancho_unidades * 7 + 5
-    return int(total)
-
-def _alto_filas_px(ws, fila_ini, fila_fin):
-    total = 0
-    for fila in range(fila_ini, fila_fin + 1):
-        dim = ws.row_dimensions.get(fila)
-        alto_puntos = dim.height if (dim and dim.height) else 15
-        total += alto_puntos * 1333 / 1000
-    return int(total)
-
-def _preparar_imagen_para_insertar(imagen_pil, ancho_max_px, alto_max_px):
+def _preparar_imagen_para_insertar(imagen_pil):
     img_copia = imagen_pil.copy().convert("RGB")
-    img_copia.thumbnail((max(ancho_max_px, 10), max(alto_max_px, 10)), Image.LANCZOS)
+    img_copia.thumbnail((1200, 1200), Image.LANCZOS)
     buf = io.BytesIO()
     img_copia.save(buf, format="PNG")
-    return buf.getvalue(), img_copia.width, img_copia.height
+    return buf.getvalue()
 
 def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
     def reemplazar(m):
@@ -389,22 +371,23 @@ def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
         return f"{m.group(1)}{fila}{m.group(3)}"
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
-def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, ancho_px, alto_px, rid):
-    emu_x = int(ancho_px * 9525)
-    emu_y = int(alto_px * 9525)
+def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
+    # Usamos twoCellAnchor para encajar la imagen exactamente en el recuadro fusionado
+    # Los 38100 son un margen mínimo (aprox 3px) para que no pise las líneas negras
     return (
-        f'<xdr:oneCellAnchor xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-        f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>9525</xdr:colOff>'
-        f'<xdr:row>{fila_0idx}</xdr:row><xdr:rowOff>9525</xdr:rowOff></xdr:from>'
-        f'<xdr:ext cx="{emu_x}" cy="{emu_y}"/>'
+        f'<xdr:twoCellAnchor editAs="oneCell">'
+        f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>38100</xdr:colOff>'
+        f'<xdr:row>{fila_0idx}</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
+        f'<xdr:to><xdr:col>{col_0idx + col_span}</xdr:col><xdr:colOff>-38100</xdr:colOff>'
+        f'<xdr:row>{fila_0idx + row_span}</xdr:row><xdr:rowOff>-38100</xdr:rowOff></xdr:to>'
         f'<xdr:pic>'
         f'<xdr:nvPicPr><xdr:cNvPr id="{id_imagen}" name="FotoApp{id_imagen}"/>'
         f'<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
         f'<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="{rid}"/>'
         f'<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
-        f'<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{emu_x}" cy="{emu_y}"/></a:xfrm>'
+        f'<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
         f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
-        f'</xdr:pic><xdr:clientData/></xdr:oneCellAnchor>'
+        f'</xdr:pic><xdr:clientData/></xdr:twoCellAnchor>'
     )
 
 def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo,
@@ -428,10 +411,19 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P6"] = revision
     ws["P7"] = pm
 
-    # MATRIZ DE ESPESORES: Estimado Fila 12, Columna I (índice 9)
+    # --- MEDICIÓN DE ESPESORES (BUSCADOR AUTOMÁTICO) ---
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
-        fila_inicio_matriz = 12 
-        col_inicio_matriz = 9   
+        fila_inicio_matriz = 15 
+        col_inicio_matriz = 3   
+        
+        # Escanear las celdas para encontrar automáticamente "ESPESORES DE PISO" sin saber la coordenada
+        for r in range(1, 50):
+            for c in range(1, 15):
+                val = str(ws.cell(row=r, column=c).value).upper()
+                if "ESPESORES DE PISO" in val or "PUNTO 1" in val:
+                    fila_inicio_matriz = r + 2
+                    col_inicio_matriz = c
+                    break
         
         for i in range(8):
             for j in range(7):
@@ -512,15 +504,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
             ws.cell(row=fila_ini, column=1, value=texto_desc)
 
-            # Columna PANORAMICO va de D a J (índices openpyxl 4 al 10) -> indice base cero: 3
-            # Columna DETALLE va de K a P (índices openpyxl 11 al 16) -> indice base cero: 10
-            ancho_pano_px = _ancho_columnas_px(ws, 4, 10) - 6
-            ancho_det_px = _ancho_columnas_px(ws, 11, 16) - 6
-            alto_bloque_px = _alto_filas_px(ws, fila_ini, fila_fin) - 6
+            alto_bloque = fila_fin - fila_ini + 1
 
-            for prefijo_foto, col_0idx, ancho_disponible in (
-                ("pano", 3, ancho_pano_px), 
-                ("det", 10, ancho_det_px)
+            for prefijo_foto, col_0idx, col_span in (
+                ("pano", 3, 7), 
+                ("det", 10, 6)
             ):
                 llave_base = f"img_{prefijo_foto}_{key_id}"
                 foto_anotada = st.session_state.get(f"{llave_base}_anotada")
@@ -534,15 +522,13 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     img_foto = foto_original
                     
                 if img_foto is not None:
-                    bytes_png, ancho_f, alto_f = _preparar_imagen_para_insertar(
-                        img_foto, ancho_disponible, alto_bloque_px
-                    )
+                    bytes_png = _preparar_imagen_para_insertar(img_foto)
                     fotos_pendientes.append({
                         "fila_0idx": fila_ini - 1,
                         "col_0idx": col_0idx,
+                        "col_span": col_span,
+                        "row_span": alto_bloque,
                         "bytes_png": bytes_png,
-                        "ancho_px": ancho_f,
-                        "alto_px": alto_f,
                     })
                 else:
                     if prefijo_foto == "det" and key_id.startswith("esp_"):
@@ -570,15 +556,14 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     if firma_archivo is not None:
         firma_archivo.seek(0)
         img_firma = Image.open(firma_archivo).convert("RGB")
-        img_firma.thumbnail((220, 90), Image.LANCZOS)
         buf_firma = io.BytesIO()
         img_firma.save(buf_firma, format="PNG")
         fotos_pendientes.append({
             "fila_0idx": fila_firma - 1,
             "col_0idx": 1,  
+            "col_span": 3,
+            "row_span": 2,
             "bytes_png": buf_firma.getvalue(),
-            "ancho_px": img_firma.width,
-            "alto_px": img_firma.height,
         })
 
     from openpyxl.worksheet.properties import PageSetupProperties
@@ -595,7 +580,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     
     z_original = zipfile.ZipFile(ruta_plantilla)
     
-    # 1. Recuperar la etiqueta <drawing> original intacta para que Excel no rompa las imágenes
+    # 1. Recuperar la etiqueta <drawing> original intacta
     sheet1_original = z_original.read('xl/worksheets/sheet1.xml').decode('utf-8')
     match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', sheet1_original)
     if not match_drawing:
@@ -637,7 +622,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         )
         
         anchors_nuevos_xml += _construir_anchor_imagen_xml(
-            id_shape, foto["col_0idx"], foto["fila_0idx"], foto["ancho_px"], foto["alto_px"], rid_actual
+            id_shape, foto["col_0idx"], foto["fila_0idx"], foto["col_span"], foto["row_span"], rid_actual
         )
         siguiente_rid += 1
         id_shape += 1
