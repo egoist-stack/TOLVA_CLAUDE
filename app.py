@@ -372,7 +372,7 @@ def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
-    # CORRECCIÓN VITAL: Sin offsets negativos. Esto previene que Excel corrompa el archivo.
+    # Usamos twoCellAnchor para encajar la imagen exactamente en el recuadro fusionado
     return (
         f'<xdr:twoCellAnchor editAs="oneCell">'
         f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>38100</xdr:colOff>'
@@ -534,7 +534,8 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     })
                 else:
                     if prefijo_foto == "det" and key_id.startswith("esp_"):
-                        ws.cell(row=fila_ini, column=12, value="-")
+                        # Escribir el guión en la columna K (índice 11 de openpyxl)
+                        ws.cell(row=fila_ini, column=11, value="-")
 
     fila_ot = 252 + desplazamiento
     fila_ot_max = 259 + desplazamiento
@@ -582,13 +583,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     
     z_original = zipfile.ZipFile(ruta_plantilla)
     
-    # 1. Recuperar la etiqueta <drawing> original intacta
     sheet1_original = z_original.read('xl/worksheets/sheet1.xml').decode('utf-8')
     match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', sheet1_original)
     if not match_drawing:
         match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', sheet1_original)
 
-    # 2. Reemplazarla en la nueva hoja generada
     for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml']:
         if nombre in z_temp.namelist():
             xml_data = z_temp.read(nombre).decode('utf-8')
@@ -599,7 +598,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     xml_data = re.sub(r'</([a-zA-Z0-9]+:)?worksheet>', lambda m: match_drawing.group(0) + m.group(0), xml_data)
             partes_nuevas[nombre] = xml_data.encode('utf-8')
 
-    # 3. Procesar las fotos nuevas en el archivo de dibujos original
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
 
