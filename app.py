@@ -13,10 +13,7 @@ st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wi
 
 st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
 
-# --- COMPONENTE DE ANOTACIÓN DE FOTOS (Streamlit Components v2) ---
-# Se registra UNA sola vez a nivel de módulo. Todo vive en este mismo
-# archivo (sin carpetas ni paquetes externos), y permite recibir de vuelta
-# la imagen anotada directamente, sin pasos de descargar/subir.
+# --- COMPONENTE DE ANOTACIÓN DE FOTOS ---
 _ANOTADOR_HTML = """
 <div>
   <div id="barra" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
@@ -95,7 +92,7 @@ export default function(component) {
       return { x: (ex-r.left)*(canvas.width/r.width), y: (ey-r.top)*(canvas.height/r.height) };
     }
     function iniciar(ev) {
-      if (parentElement._herramienta === "none") return; // no bloquea el deslizar/scroll
+      if (parentElement._herramienta === "none") return;
       ev.preventDefault();
       parentElement._dibujando = true;
       const {x,y} = coords(ev);
@@ -150,8 +147,6 @@ export default function(component) {
     const canvasEl = parentElement.querySelector('#lienzo');
     const img = new Image();
     img.onload = () => {
-      // El lienzo toma EXACTAMENTE el ancho y alto reales de la foto,
-      // para que nunca se vea estirada/aplastada (antes era un tamaño fijo).
       canvasEl.width = img.naturalWidth;
       canvasEl.height = img.naturalHeight;
       parentElement._imagenFondo = img;
@@ -169,13 +164,7 @@ _componente_anotador = st.components.v2.component(
     js=_ANOTADOR_JS,
 )
 
-
 def anotador_fotos(imagen_base64_sin_prefijo, key):
-    """
-    Muestra el lienzo de anotación para una foto y devuelve la imagen ya
-    anotada (string base64) en cuanto el usuario presiona "Guardar
-    anotación". Devuelve None mientras no se haya guardado.
-    """
     resultado = _componente_anotador(
         data={"imagen_base64": imagen_base64_sin_prefijo},
         key=key,
@@ -183,11 +172,7 @@ def anotador_fotos(imagen_base64_sin_prefijo, key):
     )
     return resultado.imagen_anotada if resultado else None
 
-
 # --- COMPONENTE DE CÁMARA CON ZOOM NATIVO ---
-# Reemplaza el widget estándar st.camera_input (que no permite zoom) por una
-# cámara propia con control de zoom real de hardware (cuando el navegador lo
-# soporta) y respaldo con pellizco/deslizador para acercar digitalmente.
 _CAMARA_HTML = """
 <div>
   <video id="video" autoplay playsinline muted></video>
@@ -243,7 +228,6 @@ export default function(component) {
       zoomSlider.value = capacidades.zoom.min;
       controlesZoom.style.display = "flex";
     } else {
-      // Respaldo: zoom digital con CSS si el navegador no expone zoom de hardware
       controlesZoom.style.display = "flex";
     }
     estadoEl.textContent = "Cámara lista";
@@ -262,7 +246,6 @@ export default function(component) {
   }
   zoomSlider.addEventListener("input", (ev) => aplicarZoom(ev.target.value));
 
-  // Pellizco con dos dedos sobre la vista previa
   let distanciaInicial = null, zoomInicial = 1;
   video.addEventListener("touchstart", (ev) => {
     if (ev.touches.length === 2) {
@@ -295,7 +278,6 @@ export default function(component) {
       lienzoCaptura.height = video.videoHeight;
       lienzoCaptura.getContext("2d").drawImage(video, 0, 0);
     } else {
-      // Recorta digitalmente la zona ampliada (zoom digital de respaldo)
       const anchoRecorte = video.videoWidth / zoomDigital;
       const altoRecorte = video.videoHeight / zoomDigital;
       const x = (video.videoWidth - anchoRecorte) / 2;
@@ -319,36 +301,15 @@ _componente_camara = st.components.v2.component(
     js=_CAMARA_JS,
 )
 
-
 def camara_nativa(key):
-    """
-    Cámara propia con zoom (usa el zoom de hardware del celular cuando el
-    navegador lo permite; si no, hace zoom digital con pellizco/deslizador).
-    Devuelve la foto capturada (string base64 con prefijo data:image/jpeg)
-    o None mientras no se haya capturado nada.
-    """
     resultado = _componente_camara(key=key, on_foto_capturada_change=lambda: None)
     return resultado.foto_capturada if resultado else None
 
 
-# --- FILAS DE ENCABEZADO DE CADA ZONA EN LA PLANTILLA EXCEL ORIGINAL ---
-# Verificado directamente contra plantilla_tolva.xlsx: en cada una, la fila
-# de encabezado (ZONA / DESCRIPCION / ...) está en estas filas, y los datos
-# de cada item empiezan 2 filas más abajo.
 _FILAS_ENCABEZADO_ZONAS_EXCEL = [30, 70, 96, 131, 162, 196]
-
-# Fila donde aparece el marcador "DESCRIPCION" (inicio de los bloques de
-# foto: Descripción / Panorámico / Detalle) para cada una de las 6 zonas.
 _FILAS_MARCADOR_FOTOS_EXCEL = [43, 77, 109, 140, 176, 204]
 
-
 def _insertar_filas_seguro(ws, fila_insercion, cantidad):
-    """
-    Inserta filas SIN corromper las celdas combinadas (un problema real y
-    comprobado de openpyxl con esta plantilla): primero desarma todas las
-    combinaciones, inserta las filas, y las vuelve a armar con las
-    coordenadas correctas.
-    """
     merges_originales = list(ws.merged_cells.ranges)
     for mc in merges_originales:
         ws.unmerge_cells(str(mc))
@@ -362,9 +323,7 @@ def _insertar_filas_seguro(ws, fila_insercion, cantidad):
             max_row += cantidad
         ws.merge_cells(start_row=min_row, start_column=min_col, end_row=max_row, end_column=max_col)
 
-
 def _copiar_estilo_bloque(ws, fila_ini_origen, fila_fin_origen, fila_ini_destino, max_col=17):
-    """Copia bordes/relleno/fuente/alto de fila desde un bloque plantilla hacia uno nuevo recién insertado."""
     import copy
     alto = fila_fin_origen - fila_ini_origen + 1
     for offset in range(alto):
@@ -382,14 +341,7 @@ def _copiar_estilo_bloque(ws, fila_ini_origen, fila_fin_origen, fila_ini_destino
             c_d.alignment = copy.copy(c_o.alignment)
             c_d.number_format = c_o.number_format
 
-
 def _obtener_bloques_fotos(ws, fila_marcador):
-    """
-    Detecta TODOS los bloques de foto (Descripción/Panorámico/Detalle)
-    disponibles a partir de la fila del marcador "DESCRIPCION", leyendo las
-    celdas combinadas reales (el alto de cada bloque varía según la zona,
-    nunca se asume un número fijo de filas).
-    """
     bloques = []
     fila_actual = fila_marcador + 1
     while True:
@@ -404,7 +356,6 @@ def _obtener_bloques_fotos(ws, fila_marcador):
         fila_actual = rango_encontrado[1] + 1
     return bloques
 
-
 def _ancho_columnas_px(ws, col_ini, col_fin):
     from openpyxl.utils import get_column_letter
     total = 0
@@ -415,7 +366,6 @@ def _ancho_columnas_px(ws, col_ini, col_fin):
         total += ancho_unidades * 7 + 5
     return int(total)
 
-
 def _alto_filas_px(ws, fila_ini, fila_fin):
     total = 0
     for fila in range(fila_ini, fila_fin + 1):
@@ -424,27 +374,21 @@ def _alto_filas_px(ws, fila_ini, fila_fin):
         total += alto_puntos * 1333 / 1000
     return int(total)
 
-
 def _preparar_imagen_para_insertar(imagen_pil, ancho_max_px, alto_max_px):
-    """Redimensiona conservando proporción (sin salirse del recuadro) y devuelve los bytes PNG + tamaño final."""
     img_copia = imagen_pil.copy().convert("RGB")
     img_copia.thumbnail((max(ancho_max_px, 10), max(alto_max_px, 10)), Image.LANCZOS)
     buf = io.BytesIO()
     img_copia.save(buf, format="PNG")
     return buf.getvalue(), img_copia.width, img_copia.height
 
-
 def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
-    """Desplaza hacia abajo las imágenes originales de la plantilla (logos, iconos) que quedaron debajo de un punto donde se insertaron filas nuevas."""
     import re
-
     def reemplazar(m):
         fila = int(m.group(2))
         if fila >= fila_insercion_0idx:
             fila += cantidad
         return f"{m.group(1)}{fila}{m.group(3)}"
     return re.sub(r'(<xdr:row>)(\d+)(</xdr:row>)', reemplazar, xml_texto)
-
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, ancho_px, alto_px, rid):
     emu_x = int(ancho_px * 9525)
@@ -464,25 +408,17 @@ def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, ancho_px, alto_
         f'</xdr:pic><xdr:clientData/></xdr:oneCellAnchor>'
     )
 
-
 def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo,
                            cod_tolva, horometro, cod_informe, revision, pm,
                            estructura_zonas, nombre_realizado, fecha_firma, firma_archivo,
-                           todos_los_rechazos):
-    """
-    Abre la plantilla original de Excel y la llena con los datos capturados,
-    SIN perder ninguna imagen/logo original y creando bloques adicionales
-    automáticamente cuando una zona tiene más de 2 hallazgos (en vez de
-    limitarse a los 2 espacios fijos de la plantilla). Devuelve
-    (bytes_del_excel, lista_vacia_de_compatibilidad).
-    """
+                           todos_los_rechazos, matriz_espesores=None):
+    
     import openpyxl
     import zipfile
 
     wb = openpyxl.load_workbook(ruta_plantilla)
     ws = wb["TOLVA DT"]
 
-    # --- Encabezado general ---
     ws["C5"] = cliente
     ws["C6"] = lugar
     ws["C7"] = fecha_insp
@@ -493,9 +429,21 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P6"] = revision
     ws["P7"] = pm
 
+    if pm in ["1000H", "2000H"] and matriz_espesores is not None:
+        fila_inicio_matriz = 15 
+        col_inicio_matriz = 3   
+        
+        for i in range(8):
+            for j in range(7):
+                valor = matriz_espesores.iloc[i, j]
+                ws.cell(row=fila_inicio_matriz + i, column=col_inicio_matriz + j, value=valor)
+                
+        if (matriz_espesores == "-").all().all():
+            ws.cell(row=fila_inicio_matriz - 1, column=col_inicio_matriz, value="NO SE REALIZÓ MEDICIÓN DE ESPESORES")
+
     desplazamiento = 0
-    puntos_insercion = []   # [(fila_insercion, cantidad), ...] para desplazar imágenes originales
-    fotos_pendientes = []   # fotos nuevas a insertar vía XML crudo
+    puntos_insercion = []   
+    fotos_pendientes = []   
 
     for idx_z, bloque_zona in enumerate(estructura_zonas):
         fila_header = _FILAS_ENCABEZADO_ZONAS_EXCEL[idx_z] + desplazamiento
@@ -534,13 +482,17 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             ws.cell(row=fila, column=12, value=condicion)
             ws.cell(row=fila, column=14, value=comentario)
 
-        # --- Bloques de foto: Descripción / Panorámico / Detalle ---
+        rechazos_zona = [r for r in todos_los_rechazos if r["key_id"].startswith(f"z{idx_z}_")]
+        
+        if idx_z == 1:
+            rechazos_zona.append({"zona": "2", "descripcion": "LETRERO LATERAL RH", "defecto": "-", "key_id": "esp_z2_rh"})
+            rechazos_zona.append({"zona": "2", "descripcion": "LETRERO LATERAL LH", "defecto": "-", "key_id": "esp_z2_lh"})
+        elif idx_z == 5:
+            rechazos_zona.append({"zona": "8", "descripcion": "LETRERO POSTERIOR", "defecto": "-", "key_id": "esp_z8_post"})
+
         fila_marcador = _FILAS_MARCADOR_FOTOS_EXCEL[idx_z] + desplazamiento
         bloques = _obtener_bloques_fotos(ws, fila_marcador)
-        rechazos_zona = [r for r in todos_los_rechazos if r["key_id"].startswith(f"z{idx_z}_")]
 
-        # Si hay más hallazgos que espacios, se DUPLICA el último bloque
-        # (mismo formato/bordes exactos) tantas veces como haga falta.
         while len(bloques) < len(rechazos_zona):
             fila_ini_ultimo, fila_fin_ultimo = bloques[-1]
             alto_bloque = fila_fin_ultimo - fila_ini_ultimo + 1
@@ -570,12 +522,14 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 llave_base = f"img_{prefijo_foto}_{key_id}"
                 foto_anotada = st.session_state.get(f"{llave_base}_anotada")
                 foto_original = st.session_state.get(llave_base)
+                
                 img_foto = None
                 if foto_anotada:
                     datos_bin = base64.b64decode(foto_anotada.split(",", 1)[1])
                     img_foto = Image.open(io.BytesIO(datos_bin))
                 elif foto_original is not None:
                     img_foto = foto_original
+                    
                 if img_foto is not None:
                     bytes_png, ancho_f, alto_f = _preparar_imagen_para_insertar(
                         img_foto, ancho_disponible, alto_bloque_px
@@ -587,13 +541,15 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                         "ancho_px": ancho_f,
                         "alto_px": alto_f,
                     })
+                else:
+                    if prefijo_foto == "det" and key_id.startswith("esp_"):
+                        ws.cell(row=fila_ini, column=12, value="-")
 
-    # --- ZONAS A REPARAR (OTs) ---
     fila_ot = 252 + desplazamiento
     fila_ot_max = 259 + desplazamiento
     for idx_ot, rechazo in enumerate(todos_los_rechazos):
         if fila_ot > fila_ot_max:
-            break  # la plantilla solo tiene espacio para 8 líneas de OT
+            break  
         defecto = rechazo["defecto"]
         prefijo = "SOLD_CBO" if defecto == "DE" else "SOLD_REP"
         codigo_sugerido = f"BK00{str(idx_ot + 1).zfill(5)}"
@@ -602,7 +558,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         ws.cell(row=fila_ot, column=1, value=texto_ot)
         fila_ot += 1
 
-    # --- Firma de "Realizado" ---
     fila_nombre = 261 + desplazamiento
     fila_firma = 264 + desplazamiento
     fila_fecha = 266 + desplazamiento
@@ -617,28 +572,18 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         img_firma.save(buf_firma, format="PNG")
         fotos_pendientes.append({
             "fila_0idx": fila_firma - 1,
-            "col_0idx": 1,  # columna B
+            "col_0idx": 1,  
             "bytes_png": buf_firma.getvalue(),
             "ancho_px": img_firma.width,
             "alto_px": img_firma.height,
         })
 
-    # --- Escala de impresión 50% (requisito del formato) ---
     from openpyxl.worksheet.properties import PageSetupProperties
     ws.page_setup.scale = 50
     if ws.sheet_properties.pageSetUpPr is None:
         ws.sheet_properties.pageSetUpPr = PageSetupProperties()
     ws.sheet_properties.pageSetUpPr.fitToPage = False
 
-    # --- Corregir los saltos de página manuales (openpyxl NO los desplaza
-    # automáticamente al insertar filas, y la plantilla trae 4 saltos fijos
-    # para que las imágenes/cuadros no se corten entre hojas al imprimir) ---
-    for fila_insercion, cantidad in puntos_insercion:
-        for brk in ws.row_breaks.brk:
-            if brk.id >= fila_insercion:
-                brk.id += cantidad
-
-    # --- Extraer SOLO las partes que openpyxl calculó bien (valores, estilos, merges) ---
     buf_temp = io.BytesIO()
     wb.save(buf_temp)
     buf_temp.seek(0)
@@ -648,26 +593,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         if nombre in z_temp.namelist():
             partes_nuevas[nombre] = z_temp.read(nombre)
 
-    # --- Reponer la referencia al dibujo (openpyxl nunca "vio" completo el
-    # drawing original al cargar la plantilla -por las imágenes EMF/complejas-
-    # así que al guardar OMITE el <drawing r:id=".../> dentro de sheet1.xml.
-    # Sin esto, aunque las imágenes existan en el archivo, Excel no las
-    # muestra porque la hoja no sabe que debe buscarlas. Se repone a mano,
-    # usando el mismo rId con el que la plantilla original relaciona la hoja
-    # con xl/drawings/drawing1.xml (verificado en xl/worksheets/_rels/sheet1.xml.rels). ---
-    sheet1_texto = partes_nuevas['xl/worksheets/sheet1.xml'].decode('utf-8')
-    if 'xmlns:r=' not in sheet1_texto.split('>', 1)[0]:
-        sheet1_texto = sheet1_texto.replace(
-            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
-            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
-            1
-        )
-    if '<drawing ' not in sheet1_texto and '<drawing/>' not in sheet1_texto:
-        sheet1_texto = sheet1_texto.replace('</worksheet>', '<drawing r:id="rId2"/></worksheet>')
-    partes_nuevas['xl/worksheets/sheet1.xml'] = sheet1_texto.encode('utf-8')
-
-    # --- Preparar drawing1.xml: desplazar imágenes originales + agregar las nuevas ---
     z_original = zipfile.ZipFile(ruta_plantilla)
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
@@ -701,7 +626,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     partes_nuevas['xl/drawings/drawing1.xml'] = drawing1_xml.encode('utf-8')
     partes_nuevas['xl/drawings/_rels/drawing1.xml.rels'] = drawing1_rels.encode('utf-8')
 
-    # --- Ensamblar el ZIP final a partir del ORIGINAL (conserva 100% de logos/formato) ---
     buf_final = io.BytesIO()
     with zipfile.ZipFile(buf_final, 'w', zipfile.ZIP_DEFLATED) as z_final:
         for item in z_original.infolist():
@@ -712,14 +636,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     buf_final.seek(0)
     return buf_final.getvalue(), []
 
-
 def convertir_excel_a_pdf(bytes_excel):
-    """
-    Convierte el Excel ya generado a PDF usando LibreOffice en modo headless
-    (necesita que 'libreoffice' esté instalado en el servidor mediante
-    packages.txt). Devuelve los bytes del PDF, o None si la conversión falla
-    (por ejemplo si LibreOffice no está disponible en el entorno).
-    """
     import subprocess
     import tempfile
 
@@ -741,14 +658,7 @@ def convertir_excel_a_pdf(bytes_excel):
                 return f.read()
         return None
 
-
 def redimensionar_conservando_calidad(img, max_lado=1400):
-    """
-    Redimensiona una foto manteniendo su proporción original (nunca la
-    distorsiona) y sin agrandar fotos pequeñas. max_lado controla el lado
-    más largo de la foto final: 1400px conserva buena nitidez para revisar
-    defectos, sin generar archivos gigantes que hagan lenta la app.
-    """
     ancho, alto = img.size
     escala = min(max_lado / max(ancho, alto), 1.0)
     if escala >= 1.0:
@@ -757,15 +667,7 @@ def redimensionar_conservando_calidad(img, max_lado=1400):
     nuevo_alto = max(1, int(alto * escala))
     return img.resize((nuevo_ancho, nuevo_alto), Image.LANCZOS)
 
-
 def mostrar_imagen_responsive(ruta_o_objeto, caption=None):
-    """
-    Muestra una imagen a ancho completo sin importar la version de Streamlit
-    instalada (el nombre del parametro para 'ancho completo' ha cambiado
-    varias veces entre versiones de Streamlit: use_column_width ->
-    use_container_width -> width='stretch'). Se prueba cada opcion en orden
-    hasta que una funcione.
-    """
     try:
         st.image(ruta_o_objeto, caption=caption, width="stretch")
     except TypeError:
@@ -834,16 +736,18 @@ with col3:
 st.markdown("---")
 
 # --- SECCIÓN MEDICIÓN DE ESPESORES (Solo en 1000H y 2000H) ---
+matriz_espesores_final = None
+
 if pm in ["1000H", "2000H"]:
     st.header("📏 Mapeo / Medición de Espesores (Matriz 8x7)")
     no_medicion = st.checkbox("⚠️ Marcar como 'NO SE REALIZÓ MEDICIÓN DE ESPESORES'", key="check_no_medicion")
 
     if no_medicion:
         st.warning("Se ha seleccionado omitir la medición. El reporte se llenará con '-' y agregará la nota explicativa.")
-        matriz_espesores_df = pd.DataFrame([["-"]*7 for _ in range(8)], 
+        matriz_espesores_final = pd.DataFrame([["-"]*7 for _ in range(8)], 
                                     index=[f"Punto {i+1}" for i in range(8)],
                                     columns=[f"Eje {j+1}" for j in range(7)])
-        st.dataframe(matriz_espesores_df, use_container_width=True)
+        st.dataframe(matriz_espesores_final, use_container_width=True)
     else:
         st.caption("Ingrese manualmente las lecturas de ultrasonido (mm) en la matriz:")
         df_init_espesores = pd.DataFrame([[20.00]*7 for _ in range(8)], 
@@ -854,7 +758,7 @@ if pm in ["1000H", "2000H"]:
             f"Eje {i+1}": st.column_config.NumberColumn(width=65, format="%.2f") for i in range(7)
         }
 
-        matriz_espesores_editada = st.data_editor(
+        matriz_espesores_final = st.data_editor(
             df_init_espesores, 
             use_container_width=False,
             column_config=column_config_espesores,
@@ -958,9 +862,6 @@ ESTRUCTURA_ZONAS = [
 ]
 
 def mostrar_esquema_zona(nombres_archivo, titulo_zona):
-    # Acepta un solo nombre (str) o una lista de nombres de archivo.
-    # El esquema se muestra SIEMPRE VISIBLE al inicio de la zona (sin expander
-    # colapsado) para que un técnico nuevo pueda guiarse de inmediato.
     if isinstance(nombres_archivo, str):
         nombres_archivo = [nombres_archivo]
 
@@ -980,21 +881,19 @@ def mostrar_esquema_zona(nombres_archivo, titulo_zona):
                     mostrar_imagen_responsive(ruta)
         st.markdown("")
 
-# --- GESTOR FOTOGRÁFICO: COMPONENTE PROPIO (SIN LIBRERÍAS EXTERNAS) ---
+# --- GESTOR FOTOGRÁFICO ---
 def gestor_fotografico(label_foto, key_foto):
     st.markdown(f"**{label_foto}**")
 
     llave_img = f"img_{key_foto}"
     llave_anotada = f"{llave_img}_anotada"
 
-    # Control para retomar foto
     if f"retomar_{key_foto}" in st.session_state and st.session_state[f"retomar_{key_foto}"]:
         for k in [llave_img, llave_anotada]:
             if k in st.session_state:
                 del st.session_state[k]
         del st.session_state[f"retomar_{key_foto}"]
 
-    # 1. CARGA DE LA IMAGEN
     if llave_img not in st.session_state:
         metodo = st.radio(
             f"Modo de Carga ({key_foto}):", 
@@ -1007,7 +906,6 @@ def gestor_fotografico(label_foto, key_foto):
         if metodo == "Cámara Directa":
             foto_b64 = camara_nativa(key=f"camnat_{key_foto}")
             if foto_b64:
-                # foto_b64 viene como "data:image/jpeg;base64,XXXX"
                 datos_binarios = base64.b64decode(foto_b64.split(",", 1)[1])
                 img_upload = Image.open(io.BytesIO(datos_binarios))
         else:
@@ -1016,20 +914,11 @@ def gestor_fotografico(label_foto, key_foto):
                 img_upload = Image.open(up_data)
 
         if img_upload is not None:
-            # 1) Corrige la rotación automática que guardan los celulares en
-            #    los metadatos EXIF (si no se hace esto, algunas fotos de
-            #    celular aparecen giradas o "aplastadas" al mostrarlas).
-            # 2) Redimensiona conservando la PROPORCIÓN ORIGINAL de la foto
-            #    (antes se forzaba siempre a 600x350, lo que distorsionaba
-            #    fotos verticales tomadas con el celular).
             img_fija = ImageOps.exif_transpose(img_upload.convert("RGB"))
             img_resized = redimensionar_conservando_calidad(img_fija, max_lado=1400)
             st.session_state[llave_img] = img_resized
             st.rerun()
 
-    # 2. ANOTACIÓN: la imagen se incrusta directo en el HTML (base64), por eso
-    # no depende de una carga de recurso aparte y funciona igual en Streamlit
-    # Cloud que en local. Además soporta dibujo con el dedo en celular.
     if llave_img in st.session_state:
         img_actual = st.session_state[llave_img]
 
@@ -1155,17 +1044,17 @@ for idx_z, bloque_zona in enumerate(ESTRUCTURA_ZONAS):
         with st.expander("📷 Letreros Obligatorios Especiales: Laterales RH / LH", expanded=False):
             f_col1, f_col2 = st.columns(2)
             with f_col1:
-                gestor_fotografico("Letrero Lateral RH", "esp_z2_rh")
+                gestor_fotografico("Letrero Lateral RH (Panorámico)", "pano_esp_z2_rh")
             with f_col2:
-                gestor_fotografico("Letrero Lateral LH", "esp_z2_lh")
+                gestor_fotografico("Letrero Lateral LH (Panorámico)", "pano_esp_z2_lh")
                 
     elif "ZONA 08" in bloque_zona["titulo"]:
         with st.expander("📷 Letrero Obligatorio Especial: Posterior", expanded=False):
             f_col1, f_col2 = st.columns(2)
             with f_col1:
-                gestor_fotografico("Letrero Posterior", "esp_z8_post")
+                gestor_fotografico("Letrero Posterior (Panorámico)", "pano_esp_z8_post")
             with f_col2:
-                st.info("Requerido para la zona posterior (Z08).")
+                st.info("Requerido para la zona posterior (Z08). El campo 'Detalle' en el Excel se llenará automáticamente con '-'.")
 
     st.caption("**Leyenda Defectos:** D: Desprendimiento | DE: Desgaste | DP: Desprendimiento Parcial | F: Fisurado | LF: Libre de fisura (Aceptable)")
     st.caption("**Leyenda Técnica:** NR: No Reparado | R: Reparado | VT: Inspección Visual | LP: Líquidos Penetrantes | UT: Ultrasonido")
@@ -1228,10 +1117,11 @@ else:
                 estructura_zonas=ESTRUCTURA_ZONAS,
                 nombre_realizado=nombre_realizado, fecha_firma=fecha_firma,
                 firma_archivo=firma_archivo,
-                todos_los_rechazos=todos_los_rechazos
+                todos_los_rechazos=todos_los_rechazos,
+                matriz_espesores=matriz_espesores_final
             )
         st.session_state["_ultimo_excel_generado"] = excel_bytes
-        st.success("✅ Reporte Excel generado correctamente (con bloques de foto creados automáticamente si alguna zona tuvo más de 2 hallazgos).")
+        st.success("✅ Reporte Excel generado correctamente.")
 
     if "_ultimo_excel_generado" in st.session_state:
         col_dl1, col_dl2 = st.columns(2)
@@ -1265,7 +1155,5 @@ else:
             "✅ Los logos y el formato original de la empresa se conservan intactos. "
             "Si una zona tiene más de 2 hallazgos, se crean bloques de foto adicionales "
             "automáticamente (mismo estilo/bordes que la plantilla). "
-            "⚠️ Pendiente: la matriz de espesores todavía no se inserta automáticamente."
+            "Las zonas 2 y 8 tienen sus espacios de letreros fijos, se suban o no fotos."
         )
-
-st.success("✔ Sistema sincronizado perfectamente con el formato de Tolvas CAT.")
