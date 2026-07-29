@@ -372,14 +372,13 @@ def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
-    # Usamos twoCellAnchor para encajar la imagen exactamente en el recuadro fusionado
-    # Los 38100 son un margen mínimo (aprox 3px) para que no pise las líneas negras
+    # CORRECCIÓN VITAL: Sin offsets negativos. Esto previene que Excel corrompa el archivo.
     return (
         f'<xdr:twoCellAnchor editAs="oneCell">'
         f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>38100</xdr:colOff>'
         f'<xdr:row>{fila_0idx}</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
-        f'<xdr:to><xdr:col>{col_0idx + col_span}</xdr:col><xdr:colOff>-38100</xdr:colOff>'
-        f'<xdr:row>{fila_0idx + row_span}</xdr:row><xdr:rowOff>-38100</xdr:rowOff></xdr:to>'
+        f'<xdr:to><xdr:col>{col_0idx + col_span}</xdr:col><xdr:colOff>0</xdr:colOff>'
+        f'<xdr:row>{fila_0idx + row_span}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>'
         f'<xdr:pic>'
         f'<xdr:nvPicPr><xdr:cNvPr id="{id_imagen}" name="FotoApp{id_imagen}"/>'
         f'<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
@@ -411,19 +410,22 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P6"] = revision
     ws["P7"] = pm
 
-    # --- MEDICIÓN DE ESPESORES (BUSCADOR AUTOMÁTICO) ---
+    # --- MEDICIÓN DE ESPESORES (BÚSQUEDA AUTOMÁTICA) ---
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
         fila_inicio_matriz = 15 
         col_inicio_matriz = 3   
         
-        # Escanear las celdas para encontrar automáticamente "ESPESORES DE PISO" sin saber la coordenada
+        encontrado = False
         for r in range(1, 50):
             for c in range(1, 15):
                 val = str(ws.cell(row=r, column=c).value).upper()
                 if "ESPESORES DE PISO" in val or "PUNTO 1" in val:
                     fila_inicio_matriz = r + 2
                     col_inicio_matriz = c
+                    encontrado = True
                     break
+            if encontrado:
+                break
         
         for i in range(8):
             for j in range(7):
