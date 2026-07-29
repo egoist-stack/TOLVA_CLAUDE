@@ -14,7 +14,7 @@ from openpyxl.styles import Font, Alignment, Border, Side
 st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wide")
 st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
 
-# --- COMPONENTE DE ANOTACIÓN DE FOTOS ---
+# --- COMPONENTE DE ANOTACIÓN Y CÁMARA (Lógica JavaScript nativa) ---
 _ANOTADOR_HTML = """
 <div>
   <div id="barra" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
@@ -137,7 +137,7 @@ export default function(component) {
     parentElement.querySelector('#limpiar').addEventListener("click", () => { parentElement._formas = []; redibujar(); });
     parentElement.querySelector('#guardar').addEventListener("click", () => {
       setStateValue('imagen_anotada', canvas.toDataURL('image/png'));
-      estadoEl.textContent = "✅ Anotación guardada en memoria.";
+      estadoEl.textContent = "✅ Anotación guardada";
     });
 
     parentElement._redibujar = redibujar;
@@ -173,7 +173,6 @@ def anotador_fotos(imagen_base64_sin_prefijo, key):
     )
     return resultado.imagen_anotada if resultado else None
 
-# --- COMPONENTE DE CÁMARA CON ZOOM NATIVO ---
 _CAMARA_HTML = """
 <div>
   <video id="video" autoplay playsinline muted></video>
@@ -325,19 +324,15 @@ def mostrar_imagen_responsive(ruta_o_objeto, caption=None):
             except TypeError: st.image(ruta_o_objeto, caption=caption)
 
 def safe_write(ws, row, col, value):
-    """Escribe en una celda previniendo de forma estricta el error de celdas combinadas."""
     try:
         ws.cell(row=row, column=col, value=value)
     except AttributeError:
-        # El error TypeError anterior ocurría por la forma en que evaluabamos in merged_range.
-        # Lo solucionamos extrayendo los bounds (limites) exactos del rango combinado.
         for merged_range in ws.merged_cells.ranges:
             min_col, min_row, max_col, max_row = merged_range.bounds
             if min_row <= row <= max_row and min_col <= col <= max_col:
                 try:
                     ws.cell(row=min_row, column=min_col, value=value)
-                except:
-                    pass
+                except: pass
                 return
     except Exception:
         pass
@@ -379,21 +374,33 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     font_black = Font(color="000000")
     title_font = Font(bold=True, size=11)
     title_alignment = Alignment(horizontal='center', vertical='center')
+    left_alignment = Alignment(horizontal='left', vertical='center')
     desc_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
     # 1. Datos Generales
-    ws["C5"] = cliente
-    ws["C6"] = lugar
-    ws["C7"] = fecha_insp
-    ws["H6"] = cod_equipo
-    ws["H7"] = cod_tolva
-    ws["L6"] = horometro
-    ws["P5"] = cod_informe
-    ws["P6"] = revision
-    ws["P7"] = pm
+    safe_write(ws, 5, 3, cliente)
+    safe_write(ws, 6, 3, lugar)
+    safe_write(ws, 7, 3, fecha_insp.strftime("%d/%m/%Y") if isinstance(fecha_insp, date) else fecha_insp)
+    safe_write(ws, 6, 8, cod_equipo)
+    safe_write(ws, 7, 8, cod_tolva)
+    safe_write(ws, 6, 12, horometro)
+    safe_write(ws, 5, 16, cod_informe)
+    safe_write(ws, 6, 16, revision)
+    safe_write(ws, 7, 16, pm)
 
-    # 2. Matriz de Espesores (Búsqueda dinámica)
+    # Pegar Esquema General (Portada) si existe
+    if os.path.exists("esquema_tolva.png"):
+        img_portada = Image.open("esquema_tolva.png")
+        buf_portada = io.BytesIO()
+        img_portada.thumbnail((1200, 450), Image.LANCZOS)
+        img_portada.save(buf_portada, format="PNG")
+        buf_portada.seek(0)
+        img_xl = OpenPyXLImage(buf_portada)
+        img_xl.anchor = "E9" # Ajuste para insertarlo en la portada general
+        ws.add_image(img_xl)
+
+    # 2. Matriz de Espesores
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
         fila_inicio_matriz = 15 
         for r in range(1, 100):
@@ -401,27 +408,17 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             if val and isinstance(val, str) and ("ESPESORES" in val.upper() or "PUNTO 1" in val.upper()):
                 fila_inicio_matriz = r + 2
                 break
-        
         for i in range(8):
             for j in range(7):
                 safe_write(ws, fila_inicio_matriz + i, 3 + j, matriz_espesores.iloc[i, j])
-                
         if (matriz_espesores == "-").all().all():
             safe_write(ws, fila_inicio_matriz - 1, 3, "NO SE REALIZÓ MEDICIÓN DE ESPESORES")
 
     # 3. Mapeo Dinámico de Zonas
-    KEYWORDS_ZONAS = [
-        "CONJUNTO DE BLINDAJE",
-        "CONJUNTO LATERAL",
-        "CANOPY",
-        "PLANCHAS DE PISO",
-        "LONGUERINA",
-        "CAJAS PIVOTE"
-    ]
-
+    KEYWORDS_ZONAS = ["CONJUNTO DE BLINDAJE", "CONJUNTO LATERAL", "CANOPY", "PLANCHAS DE PISO", "LONGUERINA", "CAJAS PIVOTE"]
     desplazamiento = 0
+
     for idx_z, bloque_zona in enumerate(estructura_zonas):
-        # Encontrar fila del título de la zona actual en el Excel
         fila_header = None
         for r in range(1, 300):
             val = ws.cell(row=r, column=1).value
@@ -429,12 +426,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 fila_header = r
                 break
                 
-        if fila_header is None:
-            continue # Si por algo no halla la zona, la salta
+        if fila_header is None: continue 
             
         fila_inicio_items = fila_header + 2
         
-        # Llenar la tabla de inspección (LF o Defectos)
+        # Escribir los resultados en la tabla
         for idx_i, item in enumerate(bloque_zona["items"]):
             cod_z, desc_z, tec_def = item
             key_id = f"z{idx_z}_{idx_i}"
@@ -451,13 +447,15 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             safe_write(ws, fila, 12, "ACEPTABLE" if es_lf else "RECHAZADO")
             safe_write(ws, fila, 14, st.session_state.get(f"com_{key_id}", "-"))
             
-            # Color del texto de la condición
+            # Formato de Letra
             for c_idx in [1, 2, 5, 7, 8, 9, 11, 12, 14]:
-                try:
-                    ws.cell(row=fila, column=c_idx).font = font_black if es_lf else font_red
+                try: ws.cell(row=fila, column=c_idx).font = font_black if es_lf else font_red
                 except: pass
 
-        # Preparamos las fotos a insertar
+        # Calcular dónde insertar las fotos (justo después del último ítem de esta zona)
+        fila_insercion_fotos = fila_inicio_items + len(bloque_zona["items"])
+        
+        # Determinar fotos necesarias para esta zona
         rechazos_zona = [r for r in todos_los_rechazos if r["key_id"].startswith(f"z{idx_z}_")]
         if idx_z == 1:
             rechazos_zona.append({"zona": "2", "descripcion": "LETRERO LATERAL RH", "defecto": "-", "key_id": "esp_z2_rh"})
@@ -465,33 +463,18 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         elif idx_z == 5:
             rechazos_zona.append({"zona": "8", "descripcion": "LETRERO POSTERIOR", "defecto": "-", "key_id": "esp_z8_post"})
 
-        fila_insercion_fotos = fila_inicio_items + len(bloque_zona["items"])
-        
-        # Insertar los bloques dinámicamente si hay defectos o zonas obligatorias
         for rechazo in rechazos_zona:
-            # Insertar 2 filas en blanco empujando el resto del excel hacia abajo
             _insertar_filas_seguro(ws, fila_insercion_fotos, 2)
             
-            # Ajustar alturas (25px para títulos, 300px para la foto)
             ws.row_dimensions[fila_insercion_fotos].height = 25
             ws.row_dimensions[fila_insercion_fotos+1].height = 300
             
-            # Unir celdas dinámicamente
-            ws.merge_cells(start_row=fila_insercion_fotos, start_column=1, end_row=fila_insercion_fotos, end_column=4)
-            ws.merge_cells(start_row=fila_insercion_fotos, start_column=5, end_row=fila_insercion_fotos, end_column=11)
-            ws.merge_cells(start_row=fila_insercion_fotos, start_column=12, end_row=fila_insercion_fotos, end_column=17)
-            
-            ws.merge_cells(start_row=fila_insercion_fotos+1, start_column=1, end_row=fila_insercion_fotos+1, end_column=4)
-            ws.merge_cells(start_row=fila_insercion_fotos+1, start_column=5, end_row=fila_insercion_fotos+1, end_column=11)
-            ws.merge_cells(start_row=fila_insercion_fotos+1, start_column=12, end_row=fila_insercion_fotos+1, end_column=17)
-            
-            # Pintar bordes
-            for r_idx in [fila_insercion_fotos, fila_insercion_fotos+1]:
-                for c_idx in range(1, 18):
-                    try: ws.cell(row=r_idx, column=c_idx).border = thin_border
-                    except: pass
-            
-            # Escribir Encabezados (con ortografía correcta)
+            # Crear y Limpiar Celdas Combinadas
+            for start_col, end_col in [(1, 4), (5, 11), (12, 17)]:
+                ws.merge_cells(start_row=fila_insercion_fotos, start_column=start_col, end_row=fila_insercion_fotos, end_column=end_col)
+                ws.merge_cells(start_row=fila_insercion_fotos+1, start_column=start_col, end_row=fila_insercion_fotos+1, end_column=end_col)
+
+            # Escribir Títulos (Limpios y Correctos)
             c_desc = ws.cell(row=fila_insercion_fotos, column=1)
             c_desc.value = "DESCRIPCIÓN"
             c_pano = ws.cell(row=fila_insercion_fotos, column=5)
@@ -502,18 +485,25 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             for c in [c_desc, c_pano, c_det]:
                 c.font = title_font
                 c.alignment = title_alignment
+                c.border = thin_border
             
-            # Escribir cuadro de descripción del defecto
-            desc_text = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
+            # Escribir Texto Defecto
+            texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
             c_texto = ws.cell(row=fila_insercion_fotos+1, column=1)
-            c_texto.value = desc_text
+            c_texto.value = texto_desc
             c_texto.alignment = desc_alignment
             
-            # Inyectar las fotos
+            # Pintar bordes limpios sin estilos arrastrados
+            for r_idx in [fila_insercion_fotos, fila_insercion_fotos+1]:
+                for c_idx in range(1, 18):
+                    try: ws.cell(row=r_idx, column=c_idx).border = thin_border
+                    except: pass
+            
+            # Inyectar Imágenes (Escaladas para no romper la celda)
             img_pano = obtener_img_state(f"img_pano_{rechazo['key_id']}")
             if img_pano:
                 buf_pano = io.BytesIO()
-                img_pano.thumbnail((420, 380), Image.LANCZOS)
+                img_pano.thumbnail((430, 390), Image.LANCZOS)
                 img_pano.save(buf_pano, format="PNG")
                 buf_pano.seek(0)
                 img_xl = OpenPyXLImage(buf_pano)
@@ -523,7 +513,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             img_det = obtener_img_state(f"img_det_{rechazo['key_id']}")
             if img_det:
                 buf_det = io.BytesIO()
-                img_det.thumbnail((420, 380), Image.LANCZOS)
+                img_det.thumbnail((430, 390), Image.LANCZOS)
                 img_det.save(buf_det, format="PNG")
                 buf_det.seek(0)
                 img_xl2 = OpenPyXLImage(buf_det)
@@ -534,10 +524,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     c_guion = ws.cell(row=fila_insercion_fotos+1, column=12)
                     c_guion.value = "-"
                     c_guion.alignment = title_alignment
-                    
-            fila_insercion_fotos += 2
 
-    # 4. Zonas a Reparar (OTs) y Firmas (Búsqueda dinámica)
+            fila_insercion_fotos += 2
+            desplazamiento += 2
+
+    # 4. Zonas a Reparar (OTs) - Ajuste de alineación y altura 25
     fila_ot = None
     for r in range(1, 1000):
         val = ws.cell(row=r, column=1).value
@@ -547,15 +538,23 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             
     if fila_ot:
         for idx_ot, rechazo in enumerate(todos_los_rechazos):
-            if idx_ot >= 8: break # Límite de la plantilla
+            if idx_ot >= 8: break
             defecto = rechazo["defecto"]
             prefijo = "SOLD_CBO" if defecto == "DE" else "SOLD_REP"
-            codigo_sugerido = f"BK00{str(idx_ot + 1).zfill(5)}"
-            codigo_backlog = st.session_state.get(f"bk_{rechazo['key_id']}", codigo_sugerido)
-            texto_ot = f"{prefijo} {rechazo['descripcion']} ({rechazo['zona']}) - {codigo_backlog}"
-            safe_write(ws, fila_ot, 1, texto_ot)
+            
+            codigo_backlog = st.session_state.get(f"bk_{rechazo['key_id']}", "").strip()
+            if codigo_backlog: # Opción de no colocar backlog (se omiten guiones si está vacío)
+                texto_ot = f"{prefijo} {rechazo['descripcion']} ({rechazo['zona']}) - {codigo_backlog}"
+            else:
+                texto_ot = f"{prefijo} {rechazo['descripcion']} ({rechazo['zona']})"
+                
+            ws.row_dimensions[fila_ot].height = 25
+            c_ot = ws.cell(row=fila_ot, column=1)
+            c_ot.value = texto_ot
+            c_ot.alignment = left_alignment
             fila_ot += 1
 
+    # 5. Firma y Ajuste final de impresión
     fila_firma = None
     for r in range(1, 1000):
         val = ws.cell(row=r, column=1).value
@@ -567,15 +566,19 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         safe_write(ws, fila_firma + 2, 2, nombre_realizado)
         safe_write(ws, fila_firma + 4, 2, fecha_firma.strftime("%d/%m/%Y") if isinstance(fecha_firma, date) else fecha_firma)
 
-        if firma_archivo is not None:
+        if firma_archivo:
             firma_archivo.seek(0)
             img_firma = Image.open(firma_archivo).convert("RGB")
             img_firma.thumbnail((220, 90), Image.LANCZOS)
             buf_firma = io.BytesIO()
             img_firma.save(buf_firma, format="PNG")
+            buf_firma.seek(0)
             img_xl_firma = OpenPyXLImage(buf_firma)
             img_xl_firma.anchor = f"B{fila_firma+2}"
             ws.add_image(img_xl_firma)
+            
+        # Ampliar el área de impresión para que las firmas no se queden por fuera
+        ws.print_area = f"A1:R{fila_firma+8}"
 
     buf_final = io.BytesIO()
     wb.save(buf_final)
@@ -616,7 +619,40 @@ def guardar_db(data):
 
 db_tolvas = cargar_db()
 
-# --- SECCIÓN 1: ENCABEZADO ---
+# --- INTERFAZ GRÁFICA DE STREAMLIT ---
+ESTRUCTURA_ZONAS = [
+    {
+        "titulo": "ZONA 01: CONJUNTO DE BLINDAJE DE TOLVA",
+        "esquema": ["CONJUNTO DE BLINDAJE DE TOLVA.png"],
+        "items": [("1.1", "REFUERZO DE PISO #1", "VT/UT"), ("1.2", "REFUERZO DE PISO #2", "VT/UT"), ("1.3", "REFUERZO DE PISO #3", "VT/UT"), ("1.4", "ROCKBOX", "VT"), ("1.5", "REFUERZO FRONTAL #1", "VT/UT"), ("1.6", "REFUERZO FRONTAL #2", "VT/UT"), ("1.7", "REFUERZO FRONTAL #3", "VT/UT"), ("1.8", "REFUERZO LATERAL RH", "VT/UT"), ("1.9", "REFUERZO LATERAL LH", "VT"), ("1.10", "CORTAFLUJOS", "VT/UT")]
+    },
+    {
+        "titulo": "ZONA 02: CONJUNTO LATERAL (RH / LH)",
+        "esquema": ["CONJUNTO LATERAL.png"],
+        "items": [("2.1", "PLANCHA LATERAL RH", "VT"), ("2.2", "VIGA CAJON LATERAL RH", "VT"), ("2.3", "PLANCHA LATERAL LH", "VT"), ("2.4", "VIGA CAJON LATERAL LH", "VT")]
+    },
+    {
+        "titulo": "ZONA 03: CANOPY",
+        "esquema": ["CANOPY.png"],
+        "items": [("3.1", "PLANCHA RH", "VT"), ("3.2", "PLANCHA LH", "VT"), ("3.3", "DEFLECTOR RH", "VT"), ("3.4", "DEFLECTOR LH", "VT"), ("3.5", "PLANCHA FRONTAL CANOPY", "VT"), ("3.6", "CARTELAS DE PLANCHA FRONTAL", "VT"), ("3.7", "VIGA LATERAL RH", "VT"), ("3.8", "VIGA LATERAL LH", "VT"), ("3.9", "REFUERZO RH DE CANOPY", "VT"), ("3.10", "REFUERZO LH DE CANOPY", "VT")]
+    },
+    {
+        "titulo": "ZONA 04 Y 05: PLANCHAS DE PISO / PLANCHAS FRONTALES",
+        "esquema": ["PLANCHAS FRONTALES.png", "PLANCHAS DE PISO.png"],
+        "items": [("4.1", "PLANCHA FRONTAL SUPERIOR", "VT"), ("4.2", "PLANCHA FRONTAL RH", "VT"), ("4.3", "PLANCHA FRONTAL LH", "VT"), ("5.1", "PLANCHA DE PISO RH", "VT/UT"), ("5.2", "PLANCHA DE PISO LH", "VT/UT"), ("5.3", "PLANCHA COLA DE PISO", "VT/UT")]
+    },
+    {
+        "titulo": "ZONA 06 Y 07: LONGUERINA DELANTERA, POSTERIOR Y VIGAS / GUIADORES",
+        "esquema": ["LONGUERINA DELANTERA, POSTERIOR Y VIGAS.png", "GUIADORES.png"],
+        "items": [("6.1", "LONGUERINA DELANTERA RH", "VT"), ("6.2", "LONGUERINA DELANTERA LH", "VT"), ("6.3", "LONGUERINA POSTERIOR RH", "VT"), ("6.4", "LONGUERINA POSTERIOR LH", "VT"), ("6.5", "VIGA DE PISO #1 RH", "VT"), ("6.6", "VIGA CAJON DE PISO #1 LH", "VT"), ("6.7", "VIGA CAJON DE PISO #2 RH", "VT"), ("6.8", "VIGA CAJON DE PISO #2 LH", "VT"), ("6.9", "VIGA CAJON DE COLA", "VT"), ("7.1", "GUIADOR RH", "VT"), ("7.2", "GUIADOR LH", "VT")]
+    },
+    {
+        "titulo": "ZONA 08: CAJAS PIVOTE",
+        "esquema": ["CAJAS PIVOTE.png"],
+        "items": [("8.1", "CAJA PIVOTE RH", "VT"), ("8.2", "CAJA PIVOTE LH", "VT"), ("8.3", "BUSHING DE CAJA PIVOTE RH", "VT"), ("8.4", "BUSHING DE CAJA PIVOTE LH", "VT"), ("8.5", "SEPARADOR DE CAJA PIVOTE", "VT")]
+    }
+]
+
 st.header("1. Datos Generales del Informe")
 
 col1, col2, col3 = st.columns(3)
@@ -649,7 +685,6 @@ with col3:
 
 st.markdown("---")
 
-# --- SECCIÓN MEDICIÓN DE ESPESORES ---
 matriz_espesores_final = None
 
 if pm in ["1000H", "2000H"]:
@@ -667,132 +702,45 @@ if pm in ["1000H", "2000H"]:
         df_init_espesores = pd.DataFrame([[20.00]*7 for _ in range(8)], 
                                index=[f"Punto {i+1}" for i in range(8)],
                                columns=[f"Eje {j+1}" for j in range(7)])
-        
-        column_config_espesores = {
-            f"Eje {i+1}": st.column_config.NumberColumn(width=65, format="%.2f") for i in range(7)
-        }
-
-        matriz_espesores_final = st.data_editor(
-            df_init_espesores, 
-            use_container_width=False,
-            column_config=column_config_espesores,
-            key="editor_espesores"
-        )
+        column_config_espesores = {f"Eje {i+1}": st.column_config.NumberColumn(width=65, format="%.2f") for i in range(7)}
+        matriz_espesores_final = st.data_editor(df_init_espesores, use_container_width=False, column_config=column_config_espesores, key="editor_espesores")
     st.markdown("---")
 
-# --- ESQUEMA VISUAL GENERAL ---
 if os.path.exists("esquema_tolva.png"):
     st.subheader("🗺️ Esquema Guía General de Zonas")
-    mostrar_imagen_responsive("esquema_tolva.png", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC")
+    try: st.image("esquema_tolva.png", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_container_width=True)
+    except TypeError: st.image("esquema_tolva.png", caption="Plano General", use_column_width=True)
 elif os.path.exists("esquema_tolva.jpg"):
     st.subheader("🗺️ Esquema Guía General de Zonas")
-    mostrar_imagen_responsive("esquema_tolva.jpg", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC")
-
-# --- CONFIGURACIÓN DE ESTRUCTURA DE ZONAS ---
-ESTRUCTURA_ZONAS = [
-    {
-        "titulo": "ZONA 01: CONJUNTO DE BLINDAJE DE TOLVA",
-        "esquema": ["CONJUNTO DE BLINDAJE DE TOLVA.png"],
-        "items": [
-            ("1.1", "REFUERZO DE PISO #1", "VT/UT"), ("1.2", "REFUERZO DE PISO #2", "VT/UT"),
-            ("1.3", "REFUERZO DE PISO #3", "VT/UT"), ("1.4", "ROCKBOX", "VT"),
-            ("1.5", "REFUERZO FRONTAL #1", "VT/UT"), ("1.6", "REFUERZO FRONTAL #2", "VT/UT"),
-            ("1.7", "REFUERZO FRONTAL #3", "VT/UT"), ("1.8", "REFUERZO LATERAL RH", "VT/UT"),
-            ("1.9", "REFUERZO LATERAL LH", "VT"), ("1.10", "CORTAFLUJOS", "VT/UT")
-        ]
-    },
-    {
-        "titulo": "ZONA 02: CONJUNTO LATERAL (RH / LH)",
-        "esquema": ["CONJUNTO LATERAL.png"],
-        "items": [
-            ("2.1", "PLANCHA LATERAL RH", "VT"), ("2.2", "VIGA CAJON LATERAL RH", "VT"),
-            ("2.3", "PLANCHA LATERAL LH", "VT"), ("2.4", "VIGA CAJON LATERAL LH", "VT")
-        ]
-    },
-    {
-        "titulo": "ZONA 03: CANOPY",
-        "esquema": ["CANOPY.png"],
-        "items": [
-            ("3.1", "PLANCHA RH", "VT"), ("3.2", "PLANCHA LH", "VT"),
-            ("3.3", "DEFLECTOR RH", "VT"), ("3.4", "DEFLECTOR LH", "VT"),
-            ("3.5", "PLANCHA FRONTAL CANOPY", "VT"), ("3.6", "CARTELAS DE PLANCHA FRONTAL", "VT"),
-            ("3.7", "VIGA LATERAL RH", "VT"), ("3.8", "VIGA LATERAL LH", "VT"),
-            ("3.9", "REFUERZO RH DE CANOPY", "VT"), ("3.10", "REFUERZO LH DE CANOPY", "VT")
-        ]
-    },
-    {
-        "titulo": "ZONA 04 Y 05: PLANCHAS DE PISO / PLANCHAS FRONTALES",
-        "esquema": ["PLANCHAS FRONTALES.png", "PLANCHAS DE PISO.png"],
-        "items": [
-            ("4.1", "PLANCHA FRONTAL SUPERIOR", "VT"), ("4.2", "PLANCHA FRONTAL RH", "VT"),
-            ("4.3", "PLANCHA FRONTAL LH", "VT"), ("5.1", "PLANCHA DE PISO RH", "VT/UT"),
-            ("5.2", "PLANCHA DE PISO LH", "VT/UT"), ("5.3", "PLANCHA COLA DE PISO", "VT/UT")
-        ]
-    },
-    {
-        "titulo": "ZONA 06 Y 07: LONGUERINA DELANTERA, POSTERIOR Y VIGAS / GUIADORES",
-        "esquema": ["LONGUERINA DELANTERA, POSTERIOR Y VIGAS.png", "GUIADORES.png"],
-        "items": [
-            ("6.1", "LONGUERINA DELANTERA RH", "VT"), ("6.2", "LONGUERINA DELANTERA LH", "VT"),
-            ("6.3", "LONGUERINA POSTERIOR RH", "VT"), ("6.4", "LONGUERINA POSTERIOR LH", "VT"),
-            ("6.5", "VIGA DE PISO #1 RH", "VT"), ("6.6", "VIGA CAJON DE PISO #1 LH", "VT"),
-            ("6.7", "VIGA CAJON DE PISO #2 RH", "VT"), ("6.8", "VIGA CAJON DE PISO #2 LH", "VT"),
-            ("6.9", "VIGA CAJON DE COLA", "VT"), ("7.1", "GUIADOR RH", "VT"), ("7.2", "GUIADOR LH", "VT")
-        ]
-    },
-    {
-        "titulo": "ZONA 08: CAJAS PIVOTE",
-        "esquema": ["CAJAS PIVOTE.png"],
-        "items": [
-            ("8.1", "CAJA PIVOTE RH", "VT"), ("8.2", "CAJA PIVOTE LH", "VT"),
-            ("8.3", "BUSHING DE CAJA PIVOTE RH", "VT"), ("8.4", "BUSHING DE CAJA PIVOTE LH", "VT"),
-            ("8.5", "SEPARADOR DE CAJA PIVOTE", "VT")
-        ]
-    }
-]
+    try: st.image("esquema_tolva.jpg", caption="Plano de Ubicación General de Componentes - Tolva CAT 794 AC", use_container_width=True)
+    except TypeError: st.image("esquema_tolva.jpg", caption="Plano General", use_column_width=True)
 
 def mostrar_esquema_zona(nombres_archivo, titulo_zona):
-    if isinstance(nombres_archivo, str):
-        nombres_archivo = [nombres_archivo]
-
-    rutas_existentes = [
-        os.path.join("imagenes_esquemas", n) for n in nombres_archivo
-        if os.path.exists(os.path.join("imagenes_esquemas", n))
-    ]
-
-    if rutas_existentes:
+    if isinstance(nombres_archivo, str): nombres_archivo = [nombres_archivo]
+    rutas = [os.path.join("imagenes_esquemas", n) for n in nombres_archivo if os.path.exists(os.path.join("imagenes_esquemas", n))]
+    if rutas:
         st.markdown("**🗺️ Esquema de referencia de la zona:**")
-        if len(rutas_existentes) == 1:
-            mostrar_imagen_responsive(rutas_existentes[0])
-        else:
-            cols = st.columns(len(rutas_existentes))
-            for c, ruta in zip(cols, rutas_existentes):
-                with c:
-                    mostrar_imagen_responsive(ruta)
+        cols = st.columns(len(rutas))
+        for c, ruta in zip(cols, rutas):
+            with c:
+                try: st.image(ruta, use_container_width=True)
+                except TypeError: st.image(ruta, use_column_width=True)
         st.markdown("")
 
-# --- GESTOR FOTOGRÁFICO ---
 def gestor_fotografico(label_foto, key_foto):
     st.markdown(f"**{label_foto}**")
-    st.warning("⚠️ Recuerda hacer clic en '💾 Guardar anotación' en el lienzo si realizas trazos antes de generar el reporte.")
+    st.warning("⚠️ Recuerda hacer clic en '💾 Guardar anotación' en el lienzo si realizas trazos.")
 
     llave_img = f"img_{key_foto}"
     llave_anotada = f"{llave_img}_anotada"
 
     if f"retomar_{key_foto}" in st.session_state and st.session_state[f"retomar_{key_foto}"]:
         for k in [llave_img, llave_anotada]:
-            if k in st.session_state:
-                del st.session_state[k]
+            if k in st.session_state: del st.session_state[k]
         del st.session_state[f"retomar_{key_foto}"]
 
     if llave_img not in st.session_state:
-        metodo = st.radio(
-            f"Modo de Carga ({key_foto}):", 
-            ["Galería / Archivo", "Cámara Directa"], 
-            key=f"rad_{key_foto}", 
-            horizontal=True
-        )
-        
+        metodo = st.radio(f"Modo de Carga ({key_foto}):", ["Galería / Archivo", "Cámara Directa"], key=f"rad_{key_foto}", horizontal=True)
         img_upload = None
         if metodo == "Cámara Directa":
             foto_b64 = camara_nativa(key=f"camnat_{key_foto}")
@@ -808,14 +756,12 @@ def gestor_fotografico(label_foto, key_foto):
             img_fija = ImageOps.exif_transpose(img_upload.convert("RGB"))
             ancho, alto = img_fija.size
             escala = min(1400 / max(ancho, alto), 1.0)
-            if escala < 1.0:
-                img_fija = img_fija.resize((int(ancho * escala), int(alto * escala)), Image.LANCZOS)
+            if escala < 1.0: img_fija = img_fija.resize((int(ancho * escala), int(alto * escala)), Image.LANCZOS)
             st.session_state[llave_img] = img_fija
             st.rerun()
 
     if llave_img in st.session_state:
         img_actual = st.session_state[llave_img]
-
         if st.button(f"🗑️ Retomar Foto", key=f"btn_retomar_{key_foto}"):
             st.session_state[f"retomar_{key_foto}"] = True
             st.rerun()
@@ -827,11 +773,10 @@ def gestor_fotografico(label_foto, key_foto):
         resultado = anotador_fotos(img_b64, key=f"anot_{key_foto}")
         if resultado:
             st.session_state[llave_anotada] = resultado
-
         if llave_anotada in st.session_state:
             st.caption("✅ Anotación guardada en memoria.")
 
-# --- PROCESAMIENTO Y DESPLIEGUE DE ZONAS ---
+
 todos_los_rechazos = [] 
 
 for idx_z, bloque_zona in enumerate(ESTRUCTURA_ZONAS):
@@ -857,99 +802,60 @@ for idx_z, bloque_zona in enumerate(ESTRUCTURA_ZONAS):
 
         c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([0.6, 2.2, 1.2, 0.8, 1.0, 1.0, 1.0, 1.2, 1.2])
 
-        with c1:
-            st.caption("ZONA")
-            st.write(f"**{cod_z}**")
-        with c2:
-            st.caption("DESCRIPCIÓN")
-            st.write(desc_z)
-        with c3:
-            st.caption("FECHA")
-            st.write(fecha_insp.strftime("%d/%m/%Y"))
+        with c1: st.write(f"**{cod_z}**")
+        with c2: st.write(desc_z)
+        with c3: st.write(fecha_insp.strftime("%d/%m/%Y"))
 
         with c4:
-            defecto = st.selectbox("DEFECTO", ["LF", "D", "DE", "DP", "F", "FA"], key=f"def_{key_id}")
-
+            defecto = st.selectbox("DEFECTO", ["LF", "D", "DE", "DP", "F", "FA"], key=f"def_{key_id}", label_visibility="collapsed")
         es_lf = (defecto == "LF")
 
         with c5:
-            if es_lf:
-                longitud = "-"
-                st.text_input("LONG. (mm)", value="-", disabled=True, key=f"long_{key_id}")
+            if es_lf: st.text_input("LONG. (mm)", value="-", disabled=True, key=f"long_{key_id}", label_visibility="collapsed")
             else:
-                opc_long = st.selectbox("LONG. (mm)", ["Manual", "VARIOS"], key=f"opclong_{key_id}")
-                if opc_long == "VARIOS":
-                    longitud = "VARIOS"
-                else:
-                    longitud = st.text_input("Valor longitud", value="100", key=f"longval_{key_id}")
+                opc_long = st.selectbox("LONG.", ["Manual", "VARIOS"], key=f"opclong_{key_id}", label_visibility="collapsed")
+                longitud = "VARIOS" if opc_long == "VARIOS" else st.text_input("Val", value="100", key=f"longval_{key_id}", label_visibility="collapsed")
 
         with c6:
-            if es_lf:
-                est_post = "-"
-                st.selectbox("EST. POST.", ["-"], disabled=True, key=f"est_{key_id}")
-            else:
-                est_post = st.selectbox("EST. POST.", ["NR", "R"], key=f"est_{key_id}")
+            if es_lf: st.selectbox("EST. POST.", ["-"], disabled=True, key=f"est_{key_id}", label_visibility="collapsed")
+            else: est_post = st.selectbox("EST. POST.", ["NR", "R"], key=f"est_{key_id}", label_visibility="collapsed")
 
-        with c7:
-            tecnica = st.selectbox("TÉCNICA", ["VT", "VT/PT", "VT/UT"], index=2 if tec_def=="VT/UT" else 0, key=f"tec_{key_id}")
+        with c7: tecnica = st.selectbox("TÉCNICA", ["VT", "VT/PT", "VT/UT"], index=2 if tec_def=="VT/UT" else 0, key=f"tec_{key_id}", label_visibility="collapsed")
 
         with c8:
-            st.caption("CONDICIÓN")
-            if es_lf:
-                st.markdown("<span style='color:#48BB78; font-weight:bold;'>ACEPTABLE</span>", unsafe_allow_html=True)
-            else:
-                st.markdown("<span style='color:#F56565; font-weight:bold;'>RECHAZADO</span>", unsafe_allow_html=True)
+            if es_lf: st.markdown("<span style='color:#48BB78; font-weight:bold;'>ACEPTABLE</span>", unsafe_allow_html=True)
+            else: st.markdown("<span style='color:#F56565; font-weight:bold;'>RECHAZADO</span>", unsafe_allow_html=True)
 
         with c9:
-            if es_lf:
-                comentario = "-"
-                st.text_input("COMENTARIOS", value="-", disabled=True, key=f"com_{key_id}")
-            else:
-                comentario = st.selectbox("COMENTARIOS", ["CREAR OT", "OT CREADA"], key=f"com_{key_id}")
+            if es_lf: comentario = "-"
+            else: comentario = st.selectbox("COMENTARIOS", ["CREAR OT", "OT CREADA"], key=f"com_{key_id}", label_visibility="collapsed")
 
         if not es_lf:
-            datos_defectuosos = {
-                "zona": cod_z,
-                "descripcion": desc_z,
-                "defecto": defecto,
-                "longitud": longitud,
-                "est_post": est_post,
-                "tecnica": tecnica,
-                "comentario": comentario,
-                "key_id": key_id
-            }
+            datos_defectuosos = {"zona": cod_z, "descripcion": desc_z, "defecto": defecto, "longitud": longitud, "est_post": est_post, "tecnica": tecnica, "comentario": comentario, "key_id": key_id}
             rechazos_de_esta_zona.append(datos_defectuosos)
             todos_los_rechazos.append(datos_defectuosos)
 
     if len(rechazos_de_esta_zona) > 0:
         st.subheader(f"📸 Registro Fotográfico de Defectos - {bloque_zona['titulo']}")
         for rechazo in rechazos_de_esta_zona:
-            expander_label = f"📷 Fotos de Hallazgo: {rechazo['descripcion']} ({rechazo['zona']}) - Defecto: [{rechazo['defecto']}]"
-            with st.expander(expander_label, expanded=True):
+            with st.expander(f"📷 Fotos de Hallazgo: {rechazo['descripcion']} ({rechazo['zona']}) - Defecto: [{rechazo['defecto']}]", expanded=True):
                 f_col1, f_col2 = st.columns(2)
-                with f_col1:
-                    gestor_fotografico("Foto Panorámica", f"pano_{rechazo['key_id']}")
-                with f_col2:
-                    gestor_fotografico("Foto de Detalle", f"det_{rechazo['key_id']}")
+                with f_col1: gestor_fotografico("Foto Panorámica", f"pano_{rechazo['key_id']}")
+                with f_col2: gestor_fotografico("Foto de Detalle", f"det_{rechazo['key_id']}")
 
     if "ZONA 02" in bloque_zona["titulo"]:
         with st.expander("📷 Letreros Obligatorios Especiales: Laterales RH / LH", expanded=False):
             f_col1, f_col2 = st.columns(2)
-            with f_col1:
-                gestor_fotografico("Letrero Lateral RH (Panorámico)", "pano_esp_z2_rh")
-            with f_col2:
-                gestor_fotografico("Letrero Lateral LH (Panorámico)", "pano_esp_z2_lh")
+            with f_col1: gestor_fotografico("Letrero Lateral RH (Panorámico)", "pano_esp_z2_rh")
+            with f_col2: gestor_fotografico("Letrero Lateral LH (Panorámico)", "pano_esp_z2_lh")
                 
     elif "ZONA 08" in bloque_zona["titulo"]:
         with st.expander("📷 Letrero Obligatorio Especial: Posterior", expanded=False):
             f_col1, f_col2 = st.columns(2)
-            with f_col1:
-                gestor_fotografico("Letrero Posterior (Panorámico)", "pano_esp_z8_post")
-            with f_col2:
-                st.info("Requerido para la zona posterior (Z08). El campo 'Detalle' en el Excel se llenará automáticamente con '-'.")
+            with f_col1: gestor_fotografico("Letrero Posterior (Panorámico)", "pano_esp_z8_post")
+            with f_col2: st.info("Requerido para la zona posterior. El campo 'Detalle' en el Excel se llenará con '-'.")
 
     st.caption("**Leyenda Defectos:** D: Desprendimiento | DE: Desgaste | DP: Desprendimiento Parcial | F: Fisurado | LF: Libre de fisura (Aceptable)")
-    st.caption("**Leyenda Técnica:** NR: No Reparado | R: Reparado | VT: Inspección Visual | LP: Líquidos Penetrantes | UT: Ultrasonido")
     st.markdown("---")
 
 # --- SECCIÓN 4: ZONAS A REPARAR ---
@@ -958,7 +864,7 @@ st.header("4. Resumen de Órdenes de Trabajo (Zonas a Reparar)")
 if len(todos_los_rechazos) == 0:
     st.success("✔ No se registraron defectos. No hay reparaciones pendientes requeridas.")
 else:
-    st.caption("Resumen sugerido de Órdenes de Trabajo según los defectos reportados:")
+    st.caption("Resumen sugerido de Órdenes de Trabajo según los defectos reportados. (Si dejas el Backlog vacío, no se imprimirá código).")
     for idx_ot, rechazo in enumerate(todos_los_rechazos):
         defecto = rechazo["defecto"]
         prefijo = "SOLD_CBO" if defecto == "DE" else "SOLD_REP"
@@ -968,18 +874,14 @@ else:
         with col_ot1:
             st.code(f"{prefijo} {rechazo['descripcion']} ({rechazo['zona']}) - {rechazo['defecto']}")
         with col_ot2:
-            st.text_input(
-                f"Código Backlog SAP ({rechazo['zona']}):", 
-                value=codigo_sugerido, 
-                key=f"bk_{rechazo['key_id']}"
-            )
+            st.text_input("Código Backlog SAP:", value=codigo_sugerido, key=f"bk_{rechazo['key_id']}")
 
 st.markdown("---")
 st.header("5. Firma del Responsable de la Inspección")
 
 col_f1, col_f2 = st.columns(2)
 with col_f1:
-    nombre_realizado = st.text_input("Nombre de quien realiza la inspección:", key="firma_nombre")
+    nombre_realizado = st.text_input("Nombre de quien realiza la inspección:", key="firma_nombre", value="Dennis Huamani Huamani")
     fecha_firma = st.date_input("Fecha de firma:", value=fecha_insp, key="firma_fecha")
 with col_f2:
     firma_archivo = st.file_uploader("Subir imagen de firma (PNG/JPG):", type=["png", "jpg", "jpeg"], key="firma_upload")
@@ -993,23 +895,17 @@ RUTA_PLANTILLA = "plantilla_tolva.xlsx"
 nombre_archivo_base = f"{cod_informe}_{fecha_insp.strftime('%Y%m%d')}"
 
 if not os.path.exists(RUTA_PLANTILLA):
-    st.error(
-        f"⚠️ No se encontró el archivo '{RUTA_PLANTILLA}' en el proyecto. "
-        "Sube la plantilla original de Excel a la misma carpeta que app.py en GitHub "
-        "(con ese nombre exacto) para poder generar el reporte."
-    )
+    st.error(f"⚠️ No se encontró el archivo '{RUTA_PLANTILLA}' en el proyecto. Sube la plantilla original vacía a GitHub.")
 else:
     if st.button("📥 Generar Reporte", type="primary"):
         with st.spinner("Generando el archivo Excel..."):
             excel_bytes, zonas_sin_espacio = generar_reporte_excel(
-                ruta_plantilla=RUTA_PLANTILLA,
-                cliente=cliente, lugar=lugar, fecha_insp=fecha_insp,
+                ruta_plantilla=RUTA_PLANTILLA, cliente=cliente, lugar=lugar, fecha_insp=fecha_insp,
                 cod_equipo=cod_equipo, cod_tolva=cod_tolva, horometro=horometro,
                 cod_informe=cod_informe, revision=revision, pm=pm,
                 estructura_zonas=ESTRUCTURA_ZONAS,
                 nombre_realizado=nombre_realizado, fecha_firma=fecha_firma,
-                firma_archivo=firma_archivo,
-                todos_los_rechazos=todos_los_rechazos,
+                firma_archivo=firma_archivo, todos_los_rechazos=todos_los_rechazos,
                 matriz_espesores=matriz_espesores_final
             )
         st.session_state["_ultimo_excel_generado"] = excel_bytes
@@ -1018,27 +914,12 @@ else:
     if "_ultimo_excel_generado" in st.session_state:
         col_dl1, col_dl2 = st.columns(2)
         with col_dl1:
-            st.download_button(
-                label="💾 Descargar Excel",
-                data=st.session_state["_ultimo_excel_generado"],
-                file_name=f"{nombre_archivo_base}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            st.download_button(label="💾 Descargar Excel", data=st.session_state["_ultimo_excel_generado"], file_name=f"{nombre_archivo_base}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with col_dl2:
             if st.button("📄 Convertir y Descargar PDF"):
                 with st.spinner("Convirtiendo a PDF... esto puede tardar un poco"):
                     pdf_bytes = convertir_excel_a_pdf(st.session_state["_ultimo_excel_generado"])
                 if pdf_bytes:
-                    st.download_button(
-                        label="💾 Descargar PDF",
-                        data=pdf_bytes,
-                        file_name=f"{nombre_archivo_base}.pdf",
-                        mime="application/pdf"
-                    )
+                    st.download_button(label="💾 Descargar PDF", data=pdf_bytes, file_name=f"{nombre_archivo_base}.pdf", mime="application/pdf")
                 else:
-                    st.error(
-                        "⚠️ No se pudo convertir a PDF. Esto pasa si el servidor no tiene "
-                        "LibreOffice instalado (revisa que subiste el archivo 'packages.txt'). "
-                        "Mientras tanto, puedes abrir el Excel descargado y usar "
-                        "'Archivo > Exportar > Crear PDF/XPS' desde Excel o Google Sheets."
-                    )
+                    st.error("⚠️ No se pudo convertir a PDF. Asegúrate de tener 'libreoffice' en packages.txt.")
