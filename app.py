@@ -372,7 +372,6 @@ def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
-    # Sin offsets negativos. Previene que Excel corrompa el archivo.
     return (
         f'<xdr:twoCellAnchor editAs="oneCell">'
         f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>38100</xdr:colOff>'
@@ -410,13 +409,13 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P6"] = revision
     ws["P7"] = pm
 
-    # --- MEDICIÓN DE ESPESORES (BÚSQUEDA AUTOMÁTICA) ---
+    # --- MEDICIÓN DE ESPESORES ---
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
         fila_inicio_matriz = 15 
         col_inicio_matriz = 3   
         
         encontrado = False
-        for r in range(1, 50):
+        for r in range(1, 100):
             for c in range(1, 15):
                 val = str(ws.cell(row=r, column=c).value).upper()
                 if "ESPESORES DE PISO" in val or "PUNTO 1" in val:
@@ -508,9 +507,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
 
             alto_bloque = fila_fin - fila_ini + 1
 
-            # Corrección de columnas: 
-            # Panorámico empieza en la columna E (índice 4 en base 0)
-            # Detalle empieza en la columna L (índice 11 en base 0)
             for prefijo_foto, col_0idx, col_span in (
                 ("pano", 4, 7), 
                 ("det", 11, 6)
@@ -537,8 +533,15 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     })
                 else:
                     if prefijo_foto == "det" and key_id.startswith("esp_"):
-                        # Escribir el guion en la columna L (índice 12 de openpyxl)
-                        ws.cell(row=fila_ini, column=12, value="-")
+                        # BLOQUE DE SEGURIDAD APLICADO AQUI PARA EVITAR EL CRASHEO
+                        try:
+                            ws.cell(row=fila_ini, column=12, value="-")
+                        except AttributeError:
+                            pass
+                        try:
+                            ws.cell(row=fila_ini, column=11, value="-")
+                        except AttributeError:
+                            pass
 
     fila_ot = 252 + desplazamiento
     fila_ot_max = 259 + desplazamiento
