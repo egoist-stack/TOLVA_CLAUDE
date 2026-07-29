@@ -1,9 +1,9 @@
 import streamlit as st
 import json
 import os
-import hashlib
 import io
 import base64
+import re
 import pandas as pd
 from datetime import date
 from PIL import Image, ImageOps
@@ -382,19 +382,18 @@ def _preparar_imagen_para_insertar(imagen_pil, ancho_max_px, alto_max_px):
     return buf.getvalue(), img_copia.width, img_copia.height
 
 def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
-    import re
     def reemplazar(m):
         fila = int(m.group(2))
         if fila >= fila_insercion_0idx:
             fila += cantidad
         return f"{m.group(1)}{fila}{m.group(3)}"
-    return re.sub(r'(<xdr:row>)(\d+)(</xdr:row>)', reemplazar, xml_texto)
+    return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, ancho_px, alto_px, rid):
     emu_x = int(ancho_px * 9525)
     emu_y = int(alto_px * 9525)
     return (
-        f'<xdr:oneCellAnchor>'
+        f'<xdr:oneCellAnchor xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
         f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>9525</xdr:colOff>'
         f'<xdr:row>{fila_0idx}</xdr:row><xdr:rowOff>9525</xdr:rowOff></xdr:from>'
         f'<xdr:ext cx="{emu_x}" cy="{emu_y}"/>'
@@ -429,9 +428,10 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P6"] = revision
     ws["P7"] = pm
 
+    # MATRIZ DE ESPESORES: Estimado Fila 12, Columna I (índice 9)
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
-        fila_inicio_matriz = 15 
-        col_inicio_matriz = 3   
+        fila_inicio_matriz = 12 
+        col_inicio_matriz = 9   
         
         for i in range(8):
             for j in range(7):
@@ -512,12 +512,15 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
             ws.cell(row=fila_ini, column=1, value=texto_desc)
 
-            ancho_pano_px = _ancho_columnas_px(ws, 5, 11) - 6
-            ancho_det_px = _ancho_columnas_px(ws, 12, 17) - 6
+            # Columna PANORAMICO va de D a J (índices openpyxl 4 al 10) -> indice base cero: 3
+            # Columna DETALLE va de K a P (índices openpyxl 11 al 16) -> indice base cero: 10
+            ancho_pano_px = _ancho_columnas_px(ws, 4, 10) - 6
+            ancho_det_px = _ancho_columnas_px(ws, 11, 16) - 6
             alto_bloque_px = _alto_filas_px(ws, fila_ini, fila_fin) - 6
 
             for prefijo_foto, col_0idx, ancho_disponible in (
-                ("pano", 4, ancho_pano_px), ("det", 11, ancho_det_px)
+                ("pano", 3, ancho_pano_px), 
+                ("det", 10, ancho_det_px)
             ):
                 llave_base = f"img_{prefijo_foto}_{key_id}"
                 foto_anotada = st.session_state.get(f"{llave_base}_anotada")
@@ -589,18 +592,33 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     buf_temp.seek(0)
     z_temp = zipfile.ZipFile(buf_temp)
     partes_nuevas = {}
+    
+    z_original = zipfile.ZipFile(ruta_plantilla)
+    
+    # 1. Recuperar la etiqueta <drawing> original intacta para que Excel no rompa las imágenes
+    sheet1_original = z_original.read('xl/worksheets/sheet1.xml').decode('utf-8')
+    match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', sheet1_original)
+    if not match_drawing:
+        match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', sheet1_original)
+
+    # 2. Reemplazarla en la nueva hoja generada
     for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml']:
         if nombre in z_temp.namelist():
-            partes_nuevas[nombre] = z_temp.read(nombre)
+            xml_data = z_temp.read(nombre).decode('utf-8')
+            if nombre == 'xl/worksheets/sheet1.xml':
+                xml_data = re.sub(r'<[a-zA-Z0-9]*:?drawing r:id=".*?"\s*/>', '', xml_data)
+                xml_data = re.sub(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', '', xml_data)
+                if match_drawing:
+                    xml_data = re.sub(r'</([a-zA-Z0-9]+:)?worksheet>', lambda m: match_drawing.group(0) + m.group(0), xml_data)
+            partes_nuevas[nombre] = xml_data.encode('utf-8')
 
-    z_original = zipfile.ZipFile(ruta_plantilla)
+    # 3. Procesar las fotos nuevas en el archivo de dibujos original
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
 
     for fila_insercion, cantidad in puntos_insercion:
         drawing1_xml = _desplazar_filas_drawing_xml(drawing1_xml, fila_insercion - 1, cantidad)
 
-    import re
     rids_existentes = re.findall(r'Id="rId(\d+)"', drawing1_rels)
     siguiente_rid = max((int(r) for r in rids_existentes), default=0) + 1
     media_nuevos = {}
@@ -611,18 +629,25 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         nombre_media = f"appFoto{siguiente_rid}.png"
         media_nuevos[f"xl/media/{nombre_media}"] = foto["bytes_png"]
         rid_actual = f"rId{siguiente_rid}"
-        drawing1_rels = drawing1_rels.replace(
-            "</Relationships>",
-            f'<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
-            f'Target="../media/{nombre_media}" Id="{rid_actual}"/></Relationships>'
+        
+        drawing1_rels = re.sub(
+            r'</([a-zA-Z0-9]+:)?Relationships>',
+            lambda m: f'<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/{nombre_media}" Id="{rid_actual}"/>' + m.group(0),
+            drawing1_rels
         )
+        
         anchors_nuevos_xml += _construir_anchor_imagen_xml(
             id_shape, foto["col_0idx"], foto["fila_0idx"], foto["ancho_px"], foto["alto_px"], rid_actual
         )
         siguiente_rid += 1
         id_shape += 1
 
-    drawing1_xml = drawing1_xml.replace("</xdr:wsDr>", anchors_nuevos_xml + "</xdr:wsDr>")
+    drawing1_xml = re.sub(
+        r'</([a-zA-Z0-9]+:)?wsDr>', 
+        lambda m: anchors_nuevos_xml + m.group(0), 
+        drawing1_xml
+    )
+    
     partes_nuevas['xl/drawings/drawing1.xml'] = drawing1_xml.encode('utf-8')
     partes_nuevas['xl/drawings/_rels/drawing1.xml.rels'] = drawing1_rels.encode('utf-8')
 
@@ -1150,10 +1175,3 @@ else:
                         "Mientras tanto, puedes abrir el Excel descargado y usar "
                         "'Archivo > Exportar > Crear PDF/XPS' desde Excel o Google Sheets."
                     )
-
-        st.caption(
-            "✅ Los logos y el formato original de la empresa se conservan intactos. "
-            "Si una zona tiene más de 2 hallazgos, se crean bloques de foto adicionales "
-            "automáticamente (mismo estilo/bordes que la plantilla). "
-            "Las zonas 2 y 8 tienen sus espacios de letreros fijos, se suban o no fotos."
-        )
