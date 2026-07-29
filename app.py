@@ -14,7 +14,7 @@ st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wi
 
 st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
 
-st.info("💡 **IMPORTANTE:** Asegúrate de que tu archivo `plantilla_tolva.xlsx` en GitHub esté **completamente vacío de fotos**. Si la plantilla tiene fotos de ejemplo, bórralas y vuelve a subirla, de lo contrario se mezclarán con las que tomes aquí.")
+st.warning("💡 **PASO CRÍTICO:** Asegúrate de que el archivo `plantilla_tolva.xlsx` alojado en tu GitHub esté **completamente vacío de fotos de ejemplo y líneas cruzadas en los cuadros**. Todo elemento gráfico en la plantilla original será clonado por el sistema.")
 
 # --- COMPONENTE DE ANOTACIÓN DE FOTOS ---
 _ANOTADOR_HTML = """
@@ -139,7 +139,7 @@ export default function(component) {
     parentElement.querySelector('#limpiar').addEventListener("click", () => { parentElement._formas = []; redibujar(); });
     parentElement.querySelector('#guardar').addEventListener("click", () => {
       setStateValue('imagen_anotada', canvas.toDataURL('image/png'));
-      estadoEl.textContent = "✅ Anotación guardada";
+      estadoEl.textContent = "✅ Anotación guardada en memoria.";
     });
 
     parentElement._redibujar = redibujar;
@@ -308,9 +308,21 @@ def camara_nativa(key):
     resultado = _componente_camara(key=key, on_foto_capturada_change=lambda: None)
     return resultado.foto_capturada if resultado else None
 
-
+# --- FUNCIONES DE EXCEL ---
 _FILAS_ENCABEZADO_ZONAS_EXCEL = [30, 70, 96, 131, 162, 196]
 _FILAS_MARCADOR_FOTOS_EXCEL = [43, 77, 109, 140, 176, 204]
+
+def _eliminar_filas_seguro(ws, fila_inicio, cantidad):
+    merges_originales = list(ws.merged_cells.ranges)
+    for mc in merges_originales:
+        ws.unmerge_cells(str(mc))
+    ws.delete_rows(fila_inicio, amount=cantidad)
+    for mc in merges_originales:
+        min_row, min_col, max_row, max_col = mc.min_row, mc.min_col, mc.max_row, mc.max_col
+        if min_row > fila_inicio:
+            min_row -= cantidad
+            max_row -= cantidad
+        ws.merge_cells(start_row=min_row, start_column=min_col, end_row=max_row, end_column=max_col)
 
 def _insertar_filas_seguro(ws, fila_insercion, cantidad):
     merges_originales = list(ws.merged_cells.ranges)
@@ -333,10 +345,9 @@ def _copiar_estilo_bloque(ws, fila_ini_origen, fila_fin_origen, fila_ini_destino
         fila_o = fila_ini_origen + offset
         fila_d = fila_ini_destino + offset
         dim_o = ws.row_dimensions.get(fila_o)
-        if dim_o and dim_o.height:
-            ws.row_dimensions[fila_d].height = dim_o.height
-        else:
-            ws.row_dimensions[fila_d].height = 180 # Aseguramos que la celda no sea minúscula
+        
+        # ALTURA GARANTIZADA DE 300 PARA LAS FOTOS
+        ws.row_dimensions[fila_d].height = 300 
             
         for col in range(1, max_col + 1):
             c_o = ws.cell(row=fila_o, column=col)
@@ -369,16 +380,17 @@ def _preparar_imagen_para_insertar(imagen_pil):
     img_copia.save(buf, format="PNG")
     return buf.getvalue()
 
-def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
+def _desplazar_filas_drawing_xml(xml_texto, pto_desplazamiento_0idx, cantidad, operacion):
+    # Si la operación es eliminar, restamos. Si es insertar, sumamos.
     def reemplazar(m):
         fila = int(m.group(2))
-        if fila >= fila_insercion_0idx:
-            fila += cantidad
+        if fila >= pto_desplazamiento_0idx:
+            fila += cantidad if operacion == 'insertar' else -cantidad
         return f"{m.group(1)}{fila}{m.group(3)}"
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
-    # Margen de seguridad de ~3 milímetros (100000 EMUs) para NO INVADIR las líneas de la tabla
+    # MARGEN DE SEGURIDAD 100000 EMU (~3mm) PARA NO PISAR LOS BORDES NEGROS DE LA CELDA
     margen = 100000
     return (
         f'<xdr:twoCellAnchor editAs="oneCell">'
@@ -413,7 +425,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     
     import openpyxl
     import zipfile
-    from openpyxl.styles import Font
 
     wb = openpyxl.load_workbook(ruta_plantilla)
     ws = wb["TOLVA DT"]
@@ -431,11 +442,9 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P6"] = revision
     ws["P7"] = pm
 
-    # --- MEDICIÓN DE ESPESORES ---
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
         fila_inicio_matriz = 15 
         col_inicio_matriz = 3   
-        
         encontrado = False
         for r in range(1, 100):
             for c in range(1, 15):
@@ -457,7 +466,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             ws.cell(row=fila_inicio_matriz - 1, column=col_inicio_matriz, value="NO SE REALIZÓ MEDICIÓN DE ESPESORES")
 
     desplazamiento = 0
-    puntos_insercion = []   
+    operaciones_estructura = [] # Para mover las imagenes nativas del excel 
     fotos_pendientes = []   
 
     for idx_z, bloque_zona in enumerate(estructura_zonas):
@@ -497,7 +506,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             ws.cell(row=fila, column=12, value=condicion)
             ws.cell(row=fila, column=14, value=comentario)
             
-            # SOLUCION DE RAIZ: Color Rojo si hay defecto, Negro si es Aceptable.
+            # COLOR ROJO EN CELDA SI ESTA RECHAZADO, NEGRO SI ES ACEPTABLE
             for c_idx in [1, 2, 5, 7, 8, 9, 11, 12, 14]:
                 try:
                     ws.cell(row=fila, column=c_idx).font = font_black if es_lf else font_red
@@ -510,55 +519,69 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         fila_marcador = _FILAS_MARCADOR_FOTOS_EXCEL[idx_z] + desplazamiento
         bloques = _obtener_bloques_fotos(ws, fila_marcador)
 
-        while len(bloques) < len(rechazos_zona):
-            fila_ini_ultimo, fila_fin_ultimo = bloques[-1]
-            alto_bloque = fila_fin_ultimo - fila_ini_ultimo + 1
-            fila_insercion = fila_fin_ultimo + 1
-            _insertar_filas_seguro(ws, fila_insercion, alto_bloque)
-            _copiar_estilo_bloque(ws, fila_ini_ultimo, fila_fin_ultimo, fila_insercion)
-            puntos_insercion.append((fila_insercion, alto_bloque))
-            desplazamiento += alto_bloque
-            bloques.append((fila_insercion, fila_insercion + alto_bloque - 1))
-
-        for idx_b, (fila_ini, fila_fin) in enumerate(bloques):
-            if idx_b >= len(rechazos_zona):
-                break
+        # ELIMINAR BLOQUE DE FOTOS SI HAY 0 DEFECTOS EN ESTA ZONA (SOLO SI NO ES ZONA 2 NI ZONA 8)
+        es_zona_especial = (idx_z == 1 or idx_z == 5)
+        
+        if len(rechazos_zona) == 0 and not es_zona_especial and len(bloques) > 0:
+            # Borrar las filas del bloque vacío
+            fila_ini_borrar, fila_fin_borrar = bloques[0]
+            alto_borrar = fila_fin_borrar - fila_ini_borrar + 1
             
-            # Asegurar altura digna para fotos nuevas
-            for r_h in range(fila_ini, fila_fin + 1):
-                if ws.row_dimensions[r_h].height is None or ws.row_dimensions[r_h].height < 80:
-                    ws.row_dimensions[r_h].height = 120
+            # Borrar el encabezado DESCRIPCION / PANORAMICO / DETALLE
+            alto_header_fotos = 1
+            _eliminar_filas_seguro(ws, fila_marcador, alto_borrar + alto_header_fotos)
+            
+            operaciones_estructura.append((fila_marcador, alto_borrar + alto_header_fotos, 'eliminar'))
+            desplazamiento -= (alto_borrar + alto_header_fotos)
+            
+        elif len(rechazos_zona) > 0 or es_zona_especial:
+            # Si hay defectos, clonar bloques si faltan
+            while len(bloques) < len(rechazos_zona):
+                fila_ini_ultimo, fila_fin_ultimo = bloques[-1]
+                alto_bloque = fila_fin_ultimo - fila_ini_ultimo + 1
+                fila_insercion = fila_fin_ultimo + 1
+                _insertar_filas_seguro(ws, fila_insercion, alto_bloque)
+                _copiar_estilo_bloque(ws, fila_ini_ultimo, fila_fin_ultimo, fila_insercion)
+                operaciones_estructura.append((fila_insercion, alto_bloque, 'insertar'))
+                desplazamiento += alto_bloque
+                bloques.append((fila_insercion, fila_insercion + alto_bloque - 1))
 
-            rechazo = rechazos_zona[idx_b]
-            key_id = rechazo["key_id"]
+            for idx_b, (fila_ini, fila_fin) in enumerate(bloques):
+                if idx_b >= len(rechazos_zona):
+                    # Solo borrar o ignorar el texto de la celda clonada que no se usará
+                    try: ws.cell(row=fila_ini, column=1, value="")
+                    except: pass
+                    break
+                
+                # Asegurar altura digna de 300px
+                for r_h in range(fila_ini, fila_fin + 1):
+                    ws.row_dimensions[r_h].height = 300
 
-            texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
-            try:
-                ws.cell(row=fila_ini, column=1, value=texto_desc)
-            except: pass
+                rechazo = rechazos_zona[idx_b]
+                key_id = rechazo["key_id"]
 
-            alto_bloque = fila_fin - fila_ini + 1
+                texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
+                try:
+                    ws.cell(row=fila_ini, column=1, value=texto_desc)
+                except: pass
 
-            for prefijo_foto, col_0idx, col_span in (("pano", 4, 7), ("det", 11, 6)):
-                llave_base = f"img_{prefijo_foto}_{key_id}"
-                img_foto = obtener_img_state(llave_base)
-                    
-                if img_foto is not None:
-                    bytes_png = _preparar_imagen_para_insertar(img_foto)
-                    fotos_pendientes.append({
-                        "fila_0idx": fila_ini - 1,
-                        "col_0idx": col_0idx,
-                        "col_span": col_span,
-                        "row_span": alto_bloque,
-                        "bytes_png": bytes_png,
-                    })
-                else:
-                    if prefijo_foto == "det" and key_id.startswith("esp_"):
-                        try: ws.cell(row=fila_ini, column=12, value="-")
-                        except AttributeError: pass
+                alto_bloque = fila_fin - fila_ini + 1
 
-    # --- RASTREADOR Y ASIGNADOR DE FOTOS FIJAS (ZONAS 2 Y 8) ---
-    # Solución de raíz: Buscar la celda exacta en la plantilla donde ya dice Letrero Lateral, etc.
+                for prefijo_foto, col_0idx, col_span in (("pano", 4, 7), ("det", 11, 6)):
+                    llave_base = f"img_{prefijo_foto}_{key_id}"
+                    img_foto = obtener_img_state(llave_base)
+                        
+                    if img_foto is not None:
+                        bytes_png = _preparar_imagen_para_insertar(img_foto)
+                        fotos_pendientes.append({
+                            "fila_0idx": fila_ini - 1,
+                            "col_0idx": col_0idx,
+                            "col_span": col_span,
+                            "row_span": alto_bloque,
+                            "bytes_png": bytes_png,
+                        })
+
+    # --- LETREROS FIJOS OBLIGATORIOS (ZONAS 2 Y 8) ---
     fotos_fijas_obligatorias = [
         ("LETRERO LATERAL RH", "esp_z2_rh"),
         ("LETRERO LATERAL LH", "esp_z2_lh"),
@@ -570,12 +593,14 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             val_search = str(ws.cell(row=r_search, column=1).value).upper()
             if texto_buscar in val_search:
                 
-                # Averiguar el alto del bloque fijo escaneando las celdas combinadas de Panorámico (Columna E)
                 row_span_pano = 1
                 for mc in ws.merged_cells.ranges:
                     if mc.min_row == r_search and mc.min_col == 5:
                         row_span_pano = mc.max_row - mc.min_row + 1
                         break
+                        
+                for r_h in range(r_search, r_search + row_span_pano):
+                    ws.row_dimensions[r_h].height = 300
                         
                 img_pano = obtener_img_state(f"img_pano_{llave_fija}")
                 if img_pano:
@@ -594,8 +619,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     })
                 else:
                     try: ws.cell(row=r_search, column=12, value="-")
-                    except AttributeError: pass
-                    try: ws.cell(row=r_search, column=11, value="-")
                     except AttributeError: pass
                 break
 
@@ -662,7 +685,6 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 xml_data = re.sub(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', '', xml_data)
                 if match_drawing:
                     tag_drawing = match_drawing.group(0)
-                    # Forzar declaración de prefijo R para evitar corrupción
                     if 'xmlns:r=' not in tag_drawing:
                         tag_drawing = tag_drawing.replace('r:id=', 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id=')
                     xml_data = xml_data.replace('</worksheet>', tag_drawing + '</worksheet>')
@@ -672,8 +694,9 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
 
-    for fila_insercion, cantidad in puntos_insercion:
-        drawing1_xml = _desplazar_filas_drawing_xml(drawing1_xml, fila_insercion - 1, cantidad)
+    # Aplicar los desplazamientos de filas tanto para inserciones como para eliminaciones
+    for pto, cantidad, operacion in operaciones_estructura:
+        drawing1_xml = _desplazar_filas_drawing_xml(drawing1_xml, pto - 1, cantidad, operacion)
 
     rids_existentes = re.findall(r'Id="rId(\d+)"', drawing1_rels)
     siguiente_rid = max((int(r) for r in rids_existentes), default=0) + 1
@@ -710,7 +733,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     buf_final = io.BytesIO()
     with zipfile.ZipFile(buf_final, 'w', zipfile.ZIP_DEFLATED) as z_final:
         for item in z_original.infolist():
-            if item.filename == 'xl/calcChain.xml': # Purgar para evitar errores de formula
+            if item.filename == 'xl/calcChain.xml': 
                 continue
             datos = partes_nuevas.get(item.filename, z_original.read(item.filename))
             z_final.writestr(item, datos)
@@ -967,7 +990,6 @@ def mostrar_esquema_zona(nombres_archivo, titulo_zona):
 # --- GESTOR FOTOGRÁFICO ---
 def gestor_fotografico(label_foto, key_foto):
     st.markdown(f"**{label_foto}**")
-    st.warning("⚠️ Recuerda hacer clic en '💾 Guardar anotación' en el lienzo si realizas trazos antes de generar el reporte.")
 
     llave_img = f"img_{key_foto}"
     llave_anotada = f"{llave_img}_anotada"
