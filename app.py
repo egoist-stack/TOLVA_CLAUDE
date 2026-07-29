@@ -630,6 +630,14 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         ws.sheet_properties.pageSetUpPr = PageSetupProperties()
     ws.sheet_properties.pageSetUpPr.fitToPage = False
 
+    # --- Corregir los saltos de página manuales (openpyxl NO los desplaza
+    # automáticamente al insertar filas, y la plantilla trae 4 saltos fijos
+    # para que las imágenes/cuadros no se corten entre hojas al imprimir) ---
+    for fila_insercion, cantidad in puntos_insercion:
+        for brk in ws.row_breaks.brk:
+            if brk.id >= fila_insercion:
+                brk.id += cantidad
+
     # --- Extraer SOLO las partes que openpyxl calculó bien (valores, estilos, merges) ---
     buf_temp = io.BytesIO()
     wb.save(buf_temp)
@@ -639,6 +647,25 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml']:
         if nombre in z_temp.namelist():
             partes_nuevas[nombre] = z_temp.read(nombre)
+
+    # --- Reponer la referencia al dibujo (openpyxl nunca "vio" completo el
+    # drawing original al cargar la plantilla -por las imágenes EMF/complejas-
+    # así que al guardar OMITE el <drawing r:id=".../> dentro de sheet1.xml.
+    # Sin esto, aunque las imágenes existan en el archivo, Excel no las
+    # muestra porque la hoja no sabe que debe buscarlas. Se repone a mano,
+    # usando el mismo rId con el que la plantilla original relaciona la hoja
+    # con xl/drawings/drawing1.xml (verificado en xl/worksheets/_rels/sheet1.xml.rels). ---
+    sheet1_texto = partes_nuevas['xl/worksheets/sheet1.xml'].decode('utf-8')
+    if 'xmlns:r=' not in sheet1_texto.split('>', 1)[0]:
+        sheet1_texto = sheet1_texto.replace(
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+            1
+        )
+    if '<drawing ' not in sheet1_texto and '<drawing/>' not in sheet1_texto:
+        sheet1_texto = sheet1_texto.replace('</worksheet>', '<drawing r:id="rId2"/></worksheet>')
+    partes_nuevas['xl/worksheets/sheet1.xml'] = sheet1_texto.encode('utf-8')
 
     # --- Preparar drawing1.xml: desplazar imágenes originales + agregar las nuevas ---
     z_original = zipfile.ZipFile(ruta_plantilla)
