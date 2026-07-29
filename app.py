@@ -9,12 +9,13 @@ from PIL import Image, ImageOps
 import openpyxl
 from openpyxl.drawing.image import Image as OpenPyXLImage
 from openpyxl.styles import Font, Alignment, Border, Side
+from copy import copy
 
 # --- CONFIGURACIÓN DE LA APP ---
 st.set_page_config(page_title="Sistema de Inspección de Tolvas CAT", layout="wide")
 st.title("📋 Reporte de Inspección de Tolvas CAT 794 AC")
 
-# --- COMPONENTE DE ANOTACIÓN Y CÁMARA (Lógica JavaScript nativa) ---
+# --- COMPONENTE DE ANOTACIÓN Y CÁMARA ---
 _ANOTADOR_HTML = """
 <div>
   <div id="barra" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
@@ -308,12 +309,52 @@ def safe_write(ws, row, col, value):
         pass
 
 def encontrar_fila(ws, texto_buscado, col=1, start=1, end=300):
-    """Busca un texto en una columna y devuelve el número de fila. Es un rastreador dinámico."""
     for r in range(start, end):
         val = ws.cell(row=r, column=col).value
         if val is not None and str(texto_buscado).strip().upper() in str(val).strip().upper():
             return r
     return None
+
+def _insertar_filas_seguro(ws, fila_insercion, cantidad):
+    merges_originales = list(ws.merged_cells.ranges)
+    for mc in merges_originales:
+        ws.unmerge_cells(str(mc))
+    ws.insert_rows(fila_insercion, amount=cantidad)
+    for mc in merges_originales:
+        min_col, min_row, max_col, max_row = mc.bounds
+        if min_row >= fila_insercion:
+            min_row += cantidad
+            max_row += cantidad
+        elif max_row >= fila_insercion:
+            max_row += cantidad
+        ws.merge_cells(start_row=min_row, start_column=min_col, end_row=max_row, end_column=max_col)
+
+def _clonar_fila(ws, fila_origen, fila_destino):
+    """Clona el formato exacto de una fila (bordes, fuentes, colores, dimensiones) a otra."""
+    if ws.row_dimensions[fila_origen].height is not None:
+        ws.row_dimensions[fila_destino].height = ws.row_dimensions[fila_origen].height
+    
+    for col in range(1, 18):
+        c_origen = ws.cell(row=fila_origen, column=col)
+        c_destino = ws.cell(row=fila_destino, column=col)
+        if c_origen.has_style:
+            c_destino.font = copy(c_origen.font)
+            c_destino.border = copy(c_origen.border)
+            c_destino.fill = copy(c_origen.fill)
+            c_destino.number_format = copy(c_origen.number_format)
+            c_destino.protection = copy(c_origen.protection)
+            c_destino.alignment = copy(c_origen.alignment)
+            
+    # Clonar celdas combinadas de esta fila
+    merges_to_add = []
+    for merged_range in ws.merged_cells.ranges:
+        min_col, min_row, max_col, max_row = merged_range.bounds
+        if min_row == fila_origen and max_row == fila_origen:
+            merges_to_add.append((min_col, max_col))
+            
+    for min_col, max_col in merges_to_add:
+        try: ws.merge_cells(start_row=fila_destino, start_column=min_col, end_row=fila_destino, end_column=max_col)
+        except: pass
 
 def redimensionar_conservando_calidad(img, max_lado=1400):
     ancho, alto = img.size
@@ -342,7 +383,7 @@ MAPA_DEFECTOS = {
     "FA": "FALTA"
 }
 
-# --- GENERADOR DEL REPORTE EXCEL (100% DINÁMICO) ---
+# --- GENERADOR DEL REPORTE EXCEL (RESPETANDO FORMATO DE PLANTILLA) ---
 def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo,
                            cod_tolva, horometro, cod_informe, revision, pm,
                            estructura_zonas, nombre_realizado, fecha_firma, firma_archivo,
@@ -351,15 +392,10 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     wb = openpyxl.load_workbook(ruta_plantilla)
     ws = wb["TOLVA DT"]
     
-    # Estilos Aceptado/Rechazado y títulos
     font_blue = Font(color="0000FF", bold=True)
     font_red = Font(color="FF0000", bold=True)
     font_black = Font(color="000000")
-    title_font = Font(bold=True, size=11)
-    title_alignment = Alignment(horizontal='center', vertical='center')
-    left_alignment = Alignment(horizontal='left', vertical='center')
-    desc_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    left_alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
 
     # 1. Datos Generales
     safe_write(ws, 5, 3, cliente)
@@ -372,29 +408,17 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     safe_write(ws, 6, 16, revision)
     safe_write(ws, 7, 16, pm)
 
-    # 2. Esquema General (Portada - Insertado en Fila 9)
-    if os.path.exists("esquema_tolva.png") or os.path.exists("esquema_tolva.jpg"):
-        ruta_gen = "esquema_tolva.png" if os.path.exists("esquema_tolva.png") else "esquema_tolva.jpg"
-        img_portada = Image.open(ruta_gen)
-        buf_portada = io.BytesIO()
-        img_portada.thumbnail((1000, 380), Image.LANCZOS)
-        img_portada.save(buf_portada, format="PNG")
-        buf_portada.seek(0)
-        img_xl = OpenPyXLImage(buf_portada)
-        img_xl.anchor = "A9" 
-        ws.add_image(img_xl)
-
-    # 3. Matriz de Espesores
+    # 2. Matriz de Espesores
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
         fila_inicio_matriz = encontrar_fila(ws, "ESPESORES DE PISO", col=3) or 13
-        fila_inicio_matriz += 2 # Saltar el encabezado
+        fila_inicio_matriz += 2 
         for i in range(8):
             for j in range(7):
                 safe_write(ws, fila_inicio_matriz + i, 3 + j, matriz_espesores.iloc[i, j])
         if (matriz_espesores == "-").all().all():
             safe_write(ws, fila_inicio_matriz - 1, 3, "NO SE REALIZÓ MEDICIÓN DE ESPESORES")
 
-    # 4. Procesamiento Dinámico de Zonas
+    # 3. Mapeo Dinámico de Zonas
     KEYWORDS_ZONAS = [
         "CONJUNTO DE BLINDAJE", "CONJUNTO LATERAL", "CANOPY", 
         "PLANCHAS DE PISO", "LONGUERINA DELANTERA", "CAJAS PIVOTE"
@@ -405,20 +429,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         fila_header = encontrar_fila(ws, KEYWORDS_ZONAS[idx_z])
         if not fila_header: continue
 
-        # B. Insertar el Esquema de la Zona (Justo encima del título de la tabla)
-        if len(bloque_zona.get("esquema", [])) > 0:
-            ruta_esq = os.path.join("imagenes_esquemas", bloque_zona["esquema"][0])
-            if os.path.exists(ruta_esq):
-                img_z = Image.open(ruta_esq)
-                buf_z = io.BytesIO()
-                img_z.thumbnail((500, 180), Image.LANCZOS)
-                img_z.save(buf_z, format="PNG")
-                buf_z.seek(0)
-                img_xl_z = OpenPyXLImage(buf_z)
-                img_xl_z.anchor = f"D{max(1, fila_header - 10)}" # Colocamos el esquema centrado en la col D, 10 filas arriba
-                ws.add_image(img_xl_z)
-
-        # C. Llenar los Datos de Inspección de la Zona
+        # B. Llenar los Datos de Inspección de la Zona
         max_fila_item = 0
         for item in bloque_zona["items"]:
             cod_z, desc_z, tec_def = item
@@ -450,31 +461,35 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     try: ws.cell(row=fila_item, column=c_idx).font = font_red
                     except: pass
 
-        # D. Insertar Bloques de Fotos (Solo si hay rechazos o es Zona Obligatoria)
+        # C. Insertar Bloques de Fotos RESPETANDO LA PLANTILLA
         rechazos_zona = [r for r in todos_los_rechazos if r["key_id"].startswith(f"z{idx_z}_")]
-        if idx_z == 1: # Obligatorio Z2
+        if idx_z == 1: 
             rechazos_zona.append({"zona": "2", "descripcion": "LETRERO LATERAL RH", "defecto": "-", "key_id": "esp_z2_rh"})
             rechazos_zona.append({"zona": "2", "descripcion": "LETRERO LATERAL LH", "defecto": "-", "key_id": "esp_z2_lh"})
-        elif idx_z == 5: # Obligatorio Z8
+        elif idx_z == 5: 
             rechazos_zona.append({"zona": "8", "descripcion": "LETRERO POSTERIOR", "defecto": "-", "key_id": "esp_z8_post"})
 
         if len(rechazos_zona) > 0 and max_fila_item > 0:
-            # Saltamos 2 filas abajo del último ítem (para no pisar la leyenda "D: Desprendimiento...")
             fila_insercion_fotos = max_fila_item + 2
             
             for rechazo in rechazos_zona:
-                ws.insert_rows(fila_insercion_fotos, amount=2)
+                _insertar_filas_seguro(ws, fila_insercion_fotos, 2)
                 
-                # Alturas Perfectas: 25px título, 300px foto
-                ws.row_dimensions[fila_insercion_fotos].height = 25
-                ws.row_dimensions[fila_insercion_fotos+1].height = 300
-                
-                # Combinar Celdas
-                for start_col, end_col in [(1, 4), (5, 11), (12, 17)]:
-                    ws.merge_cells(start_row=fila_insercion_fotos, start_column=start_col, end_row=fila_insercion_fotos, end_column=end_col)
-                    ws.merge_cells(start_row=fila_insercion_fotos+1, start_column=start_col, end_row=fila_insercion_fotos+1, end_column=end_col)
+                # Clonar el formato de filas de una sección de fotos que sabemos que está bien (asumiendo que en la fila 43 y 44 hay una plantilla de fotos)
+                # Si en tu plantilla la fila 43 es el encabezado "DESCRIPCIÓN | PANORÁMICO | DETALLE" y la 44 es el cuadro grande, se usará ese formato:
+                fila_plantilla_titulo = encontrar_fila(ws, "PANORÁMICO")
+                if fila_plantilla_titulo:
+                    _clonar_fila(ws, fila_plantilla_titulo, fila_insercion_fotos)
+                    _clonar_fila(ws, fila_plantilla_titulo + 1, fila_insercion_fotos + 1)
+                else:
+                    # Fallback si no encuentra plantilla
+                    ws.row_dimensions[fila_insercion_fotos].height = 25
+                    ws.row_dimensions[fila_insercion_fotos+1].height = 300
+                    for start_col, end_col in [(1, 4), (5, 11), (12, 17)]:
+                        ws.merge_cells(start_row=fila_insercion_fotos, start_column=start_col, end_row=fila_insercion_fotos, end_column=end_col)
+                        ws.merge_cells(start_row=fila_insercion_fotos+1, start_column=start_col, end_row=fila_insercion_fotos+1, end_column=end_col)
 
-                # Escribir Encabezados (Ortografía Correcta)
+                # Escribir Títulos (siempre ortografía correcta)
                 c_desc = ws.cell(row=fila_insercion_fotos, column=1)
                 c_desc.value = "DESCRIPCIÓN"
                 c_pano = ws.cell(row=fila_insercion_fotos, column=5)
@@ -482,28 +497,18 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 c_det = ws.cell(row=fila_insercion_fotos, column=12)
                 c_det.value = "DETALLE"
                 
-                for c in [c_desc, c_pano, c_det]:
-                    c.font = title_font
-                    c.alignment = title_alignment
-                
-                # Texto de Descripción con nombres completos del defecto
+                # Texto de Descripción
                 nombre_defecto_completo = MAPA_DEFECTOS.get(rechazo['defecto'], rechazo['defecto'])
                 texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{nombre_defecto_completo}"
                 c_texto = ws.cell(row=fila_insercion_fotos+1, column=1)
                 c_texto.value = texto_desc
-                c_texto.alignment = desc_alignment
+                c_texto.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 
-                # Bordes
-                for r_idx in [fila_insercion_fotos, fila_insercion_fotos+1]:
-                    for c_idx in range(1, 18):
-                        try: ws.cell(row=r_idx, column=c_idx).border = thin_border
-                        except: pass
-                
-                # Inyección de Fotos adaptadas para NO invadir los bordes
+                # Inyección de Fotos adaptadas y centradas
                 img_pano = obtener_img_state(f"img_pano_{rechazo['key_id']}")
                 if img_pano:
                     buf_pano = io.BytesIO()
-                    img_pano.thumbnail((430, 380), Image.LANCZOS)
+                    img_pano.thumbnail((450, 380), Image.LANCZOS)
                     img_pano.save(buf_pano, format="PNG")
                     buf_pano.seek(0)
                     img_xl = OpenPyXLImage(buf_pano)
@@ -513,7 +518,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 img_det = obtener_img_state(f"img_det_{rechazo['key_id']}")
                 if img_det:
                     buf_det = io.BytesIO()
-                    img_det.thumbnail((430, 380), Image.LANCZOS)
+                    img_det.thumbnail((450, 380), Image.LANCZOS)
                     img_det.save(buf_det, format="PNG")
                     buf_det.seek(0)
                     img_xl2 = OpenPyXLImage(buf_det)
@@ -523,11 +528,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     if rechazo['key_id'].startswith("esp_"):
                         c_guion = ws.cell(row=fila_insercion_fotos+1, column=12)
                         c_guion.value = "-"
-                        c_guion.alignment = title_alignment
+                        c_guion.alignment = Alignment(horizontal='center', vertical='center')
 
                 fila_insercion_fotos += 2
 
-    # 5. Zonas a Reparar (OTs)
+    # 5. Zonas a Reparar (OTs) - Ajuste de alineación y altura 25
     fila_ot = encontrar_fila(ws, "ZONAS A REPARAR")
     if fila_ot:
         fila_ot += 2 # Saltamos el título y el encabezado
@@ -553,8 +558,9 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     # 6. Firmas y Área de Impresión Dinámica
     fila_firma = encontrar_fila(ws, "REALIZADO POR") or encontrar_fila(ws, "REALIZADO")
     if fila_firma:
-        safe_write(ws, fila_firma + 2, 2, nombre_realizado)
-        safe_write(ws, fila_firma + 4, 2, fecha_firma.strftime("%d/%m/%Y") if isinstance(fecha_firma, date) else fecha_firma)
+        # Colocamos tu nombre y fecha en las celdas correctas
+        safe_write(ws, fila_firma + 1, 3, nombre_realizado) # Col C (3) porque ahí inicia la celda grande
+        safe_write(ws, fila_firma + 6, 3, fecha_firma.strftime("%d/%m/%Y") if isinstance(fecha_firma, date) else fecha_firma)
 
         if firma_archivo:
             firma_archivo.seek(0)
@@ -564,11 +570,12 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             img_firma.save(buf_firma, format="PNG")
             buf_firma.seek(0)
             img_xl_firma = OpenPyXLImage(buf_firma)
-            img_xl_firma.anchor = f"B{fila_firma+2}"
+            img_xl_firma.anchor = f"B{fila_firma+3}" # Se ancla en B debajo de "FIRMA:"
             ws.add_image(img_xl_firma)
             
-        # Ampliamos el Área de Impresión (Print Area) para asegurar que las firmas salgan completas
-        ws.print_area = f"A1:R{fila_firma+8}"
+        # Ampliamos el Área de Impresión dinámicamente hasta el final
+        max_row = ws.max_row
+        ws.print_area = f"A1:R{max_row}"
 
     buf_final = io.BytesIO()
     wb.save(buf_final)
@@ -591,12 +598,6 @@ def convertir_excel_a_pdf(bytes_excel):
             with open(ruta_pdf, "rb") as f:
                 return f.read()
         return None
-
-def mostrar_imagen_responsive(ruta_o_objeto, caption=None):
-    try: st.image(ruta_o_objeto, caption=caption, width="stretch")
-    except TypeError:
-        try: st.image(ruta_o_objeto, caption=caption, use_container_width=True)
-        except TypeError: st.image(ruta_o_objeto, caption=caption, use_column_width=True)
 
 # --- BASE DE DATOS LOCAL PARA RECORDAR TOLVA ---
 DB_FILE = os.path.join("base_datos", "tolvas_db.json")
