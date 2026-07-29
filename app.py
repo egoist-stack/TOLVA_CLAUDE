@@ -331,6 +331,390 @@ def camara_nativa(key):
     return resultado.foto_capturada if resultado else None
 
 
+# --- FILAS DE ENCABEZADO DE CADA ZONA EN LA PLANTILLA EXCEL ORIGINAL ---
+# Verificado directamente contra plantilla_tolva.xlsx: en cada una, la fila
+# de encabezado (ZONA / DESCRIPCION / ...) está en estas filas, y los datos
+# de cada item empiezan 2 filas más abajo.
+_FILAS_ENCABEZADO_ZONAS_EXCEL = [30, 70, 96, 131, 162, 196]
+
+# Fila donde aparece el marcador "DESCRIPCION" (inicio de los bloques de
+# foto: Descripción / Panorámico / Detalle) para cada una de las 6 zonas.
+_FILAS_MARCADOR_FOTOS_EXCEL = [43, 77, 109, 140, 176, 204]
+
+
+def _insertar_filas_seguro(ws, fila_insercion, cantidad):
+    """
+    Inserta filas SIN corromper las celdas combinadas (un problema real y
+    comprobado de openpyxl con esta plantilla): primero desarma todas las
+    combinaciones, inserta las filas, y las vuelve a armar con las
+    coordenadas correctas.
+    """
+    merges_originales = list(ws.merged_cells.ranges)
+    for mc in merges_originales:
+        ws.unmerge_cells(str(mc))
+    ws.insert_rows(fila_insercion, amount=cantidad)
+    for mc in merges_originales:
+        min_row, min_col, max_row, max_col = mc.min_row, mc.min_col, mc.max_row, mc.max_col
+        if min_row >= fila_insercion:
+            min_row += cantidad
+            max_row += cantidad
+        elif max_row >= fila_insercion:
+            max_row += cantidad
+        ws.merge_cells(start_row=min_row, start_column=min_col, end_row=max_row, end_column=max_col)
+
+
+def _copiar_estilo_bloque(ws, fila_ini_origen, fila_fin_origen, fila_ini_destino, max_col=17):
+    """Copia bordes/relleno/fuente/alto de fila desde un bloque plantilla hacia uno nuevo recién insertado."""
+    import copy
+    alto = fila_fin_origen - fila_ini_origen + 1
+    for offset in range(alto):
+        fila_o = fila_ini_origen + offset
+        fila_d = fila_ini_destino + offset
+        dim_o = ws.row_dimensions.get(fila_o)
+        if dim_o and dim_o.height:
+            ws.row_dimensions[fila_d].height = dim_o.height
+        for col in range(1, max_col + 1):
+            c_o = ws.cell(row=fila_o, column=col)
+            c_d = ws.cell(row=fila_d, column=col)
+            c_d.font = copy.copy(c_o.font)
+            c_d.border = copy.copy(c_o.border)
+            c_d.fill = copy.copy(c_o.fill)
+            c_d.alignment = copy.copy(c_o.alignment)
+            c_d.number_format = c_o.number_format
+
+
+def _obtener_bloques_fotos(ws, fila_marcador):
+    """
+    Detecta TODOS los bloques de foto (Descripción/Panorámico/Detalle)
+    disponibles a partir de la fila del marcador "DESCRIPCION", leyendo las
+    celdas combinadas reales (el alto de cada bloque varía según la zona,
+    nunca se asume un número fijo de filas).
+    """
+    bloques = []
+    fila_actual = fila_marcador + 1
+    while True:
+        rango_encontrado = None
+        for mc in ws.merged_cells.ranges:
+            if mc.min_col == 1 and mc.min_row == fila_actual:
+                rango_encontrado = (mc.min_row, mc.max_row)
+                break
+        if rango_encontrado is None:
+            break
+        bloques.append(rango_encontrado)
+        fila_actual = rango_encontrado[1] + 1
+    return bloques
+
+
+def _ancho_columnas_px(ws, col_ini, col_fin):
+    from openpyxl.utils import get_column_letter
+    total = 0
+    for col in range(col_ini, col_fin + 1):
+        letra = get_column_letter(col)
+        dim = ws.column_dimensions.get(letra)
+        ancho_unidades = dim.width if (dim and dim.width) else 8.43
+        total += ancho_unidades * 7 + 5
+    return int(total)
+
+
+def _alto_filas_px(ws, fila_ini, fila_fin):
+    total = 0
+    for fila in range(fila_ini, fila_fin + 1):
+        dim = ws.row_dimensions.get(fila)
+        alto_puntos = dim.height if (dim and dim.height) else 15
+        total += alto_puntos * 1333 / 1000
+    return int(total)
+
+
+def _preparar_imagen_para_insertar(imagen_pil, ancho_max_px, alto_max_px):
+    """Redimensiona conservando proporción (sin salirse del recuadro) y devuelve los bytes PNG + tamaño final."""
+    img_copia = imagen_pil.copy().convert("RGB")
+    img_copia.thumbnail((max(ancho_max_px, 10), max(alto_max_px, 10)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img_copia.save(buf, format="PNG")
+    return buf.getvalue(), img_copia.width, img_copia.height
+
+
+def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
+    """Desplaza hacia abajo las imágenes originales de la plantilla (logos, iconos) que quedaron debajo de un punto donde se insertaron filas nuevas."""
+    import re
+
+    def reemplazar(m):
+        fila = int(m.group(2))
+        if fila >= fila_insercion_0idx:
+            fila += cantidad
+        return f"{m.group(1)}{fila}{m.group(3)}"
+    return re.sub(r'(<xdr:row>)(\d+)(</xdr:row>)', reemplazar, xml_texto)
+
+
+def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, ancho_px, alto_px, rid):
+    emu_x = int(ancho_px * 9525)
+    emu_y = int(alto_px * 9525)
+    return (
+        f'<xdr:oneCellAnchor>'
+        f'<xdr:from><xdr:col>{col_0idx}</xdr:col><xdr:colOff>9525</xdr:colOff>'
+        f'<xdr:row>{fila_0idx}</xdr:row><xdr:rowOff>9525</xdr:rowOff></xdr:from>'
+        f'<xdr:ext cx="{emu_x}" cy="{emu_y}"/>'
+        f'<xdr:pic>'
+        f'<xdr:nvPicPr><xdr:cNvPr id="{id_imagen}" name="FotoApp{id_imagen}"/>'
+        f'<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
+        f'<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="{rid}"/>'
+        f'<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+        f'<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{emu_x}" cy="{emu_y}"/></a:xfrm>'
+        f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+        f'</xdr:pic><xdr:clientData/></xdr:oneCellAnchor>'
+    )
+
+
+def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo,
+                           cod_tolva, horometro, cod_informe, revision, pm,
+                           estructura_zonas, nombre_realizado, fecha_firma, firma_archivo,
+                           todos_los_rechazos):
+    """
+    Abre la plantilla original de Excel y la llena con los datos capturados,
+    SIN perder ninguna imagen/logo original y creando bloques adicionales
+    automáticamente cuando una zona tiene más de 2 hallazgos (en vez de
+    limitarse a los 2 espacios fijos de la plantilla). Devuelve
+    (bytes_del_excel, lista_vacia_de_compatibilidad).
+    """
+    import openpyxl
+    import zipfile
+
+    wb = openpyxl.load_workbook(ruta_plantilla)
+    ws = wb["TOLVA DT"]
+
+    # --- Encabezado general ---
+    ws["C5"] = cliente
+    ws["C6"] = lugar
+    ws["C7"] = fecha_insp
+    ws["H6"] = cod_equipo
+    ws["H7"] = cod_tolva
+    ws["L6"] = horometro
+    ws["P5"] = cod_informe
+    ws["P6"] = revision
+    ws["P7"] = pm
+
+    desplazamiento = 0
+    puntos_insercion = []   # [(fila_insercion, cantidad), ...] para desplazar imágenes originales
+    fotos_pendientes = []   # fotos nuevas a insertar vía XML crudo
+
+    for idx_z, bloque_zona in enumerate(estructura_zonas):
+        fila_header = _FILAS_ENCABEZADO_ZONAS_EXCEL[idx_z] + desplazamiento
+        fila_inicio_items = fila_header + 2
+
+        for idx_i, item in enumerate(bloque_zona["items"]):
+            cod_z, desc_z, tec_def = item
+            key_id = f"z{idx_z}_{idx_i}"
+            fila = fila_inicio_items + idx_i
+
+            defecto = st.session_state.get(f"def_{key_id}", "LF")
+            es_lf = (defecto == "LF")
+
+            if es_lf:
+                longitud = "-"
+                est_post = "-"
+                condicion = "ACEPTABLE"
+                comentario = "-"
+            else:
+                opc_long = st.session_state.get(f"opclong_{key_id}", "Manual")
+                if opc_long == "VARIOS":
+                    longitud = "VARIOS"
+                else:
+                    longitud = st.session_state.get(f"longval_{key_id}", "100")
+                est_post = st.session_state.get(f"est_{key_id}", "NR")
+                condicion = "RECHAZADO"
+                comentario = st.session_state.get(f"com_{key_id}", "CREAR OT")
+
+            tecnica = st.session_state.get(f"tec_{key_id}", tec_def)
+
+            ws.cell(row=fila, column=5, value=fecha_insp)
+            ws.cell(row=fila, column=7, value=defecto)
+            ws.cell(row=fila, column=8, value=longitud)
+            ws.cell(row=fila, column=9, value=est_post)
+            ws.cell(row=fila, column=11, value=tecnica)
+            ws.cell(row=fila, column=12, value=condicion)
+            ws.cell(row=fila, column=14, value=comentario)
+
+        # --- Bloques de foto: Descripción / Panorámico / Detalle ---
+        fila_marcador = _FILAS_MARCADOR_FOTOS_EXCEL[idx_z] + desplazamiento
+        bloques = _obtener_bloques_fotos(ws, fila_marcador)
+        rechazos_zona = [r for r in todos_los_rechazos if r["key_id"].startswith(f"z{idx_z}_")]
+
+        # Si hay más hallazgos que espacios, se DUPLICA el último bloque
+        # (mismo formato/bordes exactos) tantas veces como haga falta.
+        while len(bloques) < len(rechazos_zona):
+            fila_ini_ultimo, fila_fin_ultimo = bloques[-1]
+            alto_bloque = fila_fin_ultimo - fila_ini_ultimo + 1
+            fila_insercion = fila_fin_ultimo + 1
+            _insertar_filas_seguro(ws, fila_insercion, alto_bloque)
+            _copiar_estilo_bloque(ws, fila_ini_ultimo, fila_fin_ultimo, fila_insercion)
+            puntos_insercion.append((fila_insercion, alto_bloque))
+            desplazamiento += alto_bloque
+            bloques.append((fila_insercion, fila_insercion + alto_bloque - 1))
+
+        for idx_b, (fila_ini, fila_fin) in enumerate(bloques):
+            if idx_b >= len(rechazos_zona):
+                break
+            rechazo = rechazos_zona[idx_b]
+            key_id = rechazo["key_id"]
+
+            texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{rechazo['defecto']}"
+            ws.cell(row=fila_ini, column=1, value=texto_desc)
+
+            ancho_pano_px = _ancho_columnas_px(ws, 5, 11) - 6
+            ancho_det_px = _ancho_columnas_px(ws, 12, 17) - 6
+            alto_bloque_px = _alto_filas_px(ws, fila_ini, fila_fin) - 6
+
+            for prefijo_foto, col_0idx, ancho_disponible in (
+                ("pano", 4, ancho_pano_px), ("det", 11, ancho_det_px)
+            ):
+                llave_base = f"img_{prefijo_foto}_{key_id}"
+                foto_anotada = st.session_state.get(f"{llave_base}_anotada")
+                foto_original = st.session_state.get(llave_base)
+                img_foto = None
+                if foto_anotada:
+                    datos_bin = base64.b64decode(foto_anotada.split(",", 1)[1])
+                    img_foto = Image.open(io.BytesIO(datos_bin))
+                elif foto_original is not None:
+                    img_foto = foto_original
+                if img_foto is not None:
+                    bytes_png, ancho_f, alto_f = _preparar_imagen_para_insertar(
+                        img_foto, ancho_disponible, alto_bloque_px
+                    )
+                    fotos_pendientes.append({
+                        "fila_0idx": fila_ini - 1,
+                        "col_0idx": col_0idx,
+                        "bytes_png": bytes_png,
+                        "ancho_px": ancho_f,
+                        "alto_px": alto_f,
+                    })
+
+    # --- ZONAS A REPARAR (OTs) ---
+    fila_ot = 252 + desplazamiento
+    fila_ot_max = 259 + desplazamiento
+    for idx_ot, rechazo in enumerate(todos_los_rechazos):
+        if fila_ot > fila_ot_max:
+            break  # la plantilla solo tiene espacio para 8 líneas de OT
+        defecto = rechazo["defecto"]
+        prefijo = "SOLD_CBO" if defecto == "DE" else "SOLD_REP"
+        codigo_sugerido = f"BK00{str(idx_ot + 1).zfill(5)}"
+        codigo_backlog = st.session_state.get(f"bk_{rechazo['key_id']}", codigo_sugerido)
+        texto_ot = f"{prefijo} {rechazo['descripcion']} ({rechazo['zona']}) - {codigo_backlog}"
+        ws.cell(row=fila_ot, column=1, value=texto_ot)
+        fila_ot += 1
+
+    # --- Firma de "Realizado" ---
+    fila_nombre = 261 + desplazamiento
+    fila_firma = 264 + desplazamiento
+    fila_fecha = 266 + desplazamiento
+    ws.cell(row=fila_nombre, column=2, value=nombre_realizado)
+    ws.cell(row=fila_fecha, column=2, value=fecha_firma)
+
+    if firma_archivo is not None:
+        firma_archivo.seek(0)
+        img_firma = Image.open(firma_archivo).convert("RGB")
+        img_firma.thumbnail((220, 90), Image.LANCZOS)
+        buf_firma = io.BytesIO()
+        img_firma.save(buf_firma, format="PNG")
+        fotos_pendientes.append({
+            "fila_0idx": fila_firma - 1,
+            "col_0idx": 1,  # columna B
+            "bytes_png": buf_firma.getvalue(),
+            "ancho_px": img_firma.width,
+            "alto_px": img_firma.height,
+        })
+
+    # --- Escala de impresión 50% (requisito del formato) ---
+    from openpyxl.worksheet.properties import PageSetupProperties
+    ws.page_setup.scale = 50
+    if ws.sheet_properties.pageSetUpPr is None:
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties()
+    ws.sheet_properties.pageSetUpPr.fitToPage = False
+
+    # --- Extraer SOLO las partes que openpyxl calculó bien (valores, estilos, merges) ---
+    buf_temp = io.BytesIO()
+    wb.save(buf_temp)
+    buf_temp.seek(0)
+    z_temp = zipfile.ZipFile(buf_temp)
+    partes_nuevas = {}
+    for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml']:
+        if nombre in z_temp.namelist():
+            partes_nuevas[nombre] = z_temp.read(nombre)
+
+    # --- Preparar drawing1.xml: desplazar imágenes originales + agregar las nuevas ---
+    z_original = zipfile.ZipFile(ruta_plantilla)
+    drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
+    drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
+
+    for fila_insercion, cantidad in puntos_insercion:
+        drawing1_xml = _desplazar_filas_drawing_xml(drawing1_xml, fila_insercion - 1, cantidad)
+
+    import re
+    rids_existentes = re.findall(r'Id="rId(\d+)"', drawing1_rels)
+    siguiente_rid = max((int(r) for r in rids_existentes), default=0) + 1
+    media_nuevos = {}
+    anchors_nuevos_xml = ""
+    id_shape = 9000
+
+    for foto in fotos_pendientes:
+        nombre_media = f"appFoto{siguiente_rid}.png"
+        media_nuevos[f"xl/media/{nombre_media}"] = foto["bytes_png"]
+        rid_actual = f"rId{siguiente_rid}"
+        drawing1_rels = drawing1_rels.replace(
+            "</Relationships>",
+            f'<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+            f'Target="../media/{nombre_media}" Id="{rid_actual}"/></Relationships>'
+        )
+        anchors_nuevos_xml += _construir_anchor_imagen_xml(
+            id_shape, foto["col_0idx"], foto["fila_0idx"], foto["ancho_px"], foto["alto_px"], rid_actual
+        )
+        siguiente_rid += 1
+        id_shape += 1
+
+    drawing1_xml = drawing1_xml.replace("</xdr:wsDr>", anchors_nuevos_xml + "</xdr:wsDr>")
+    partes_nuevas['xl/drawings/drawing1.xml'] = drawing1_xml.encode('utf-8')
+    partes_nuevas['xl/drawings/_rels/drawing1.xml.rels'] = drawing1_rels.encode('utf-8')
+
+    # --- Ensamblar el ZIP final a partir del ORIGINAL (conserva 100% de logos/formato) ---
+    buf_final = io.BytesIO()
+    with zipfile.ZipFile(buf_final, 'w', zipfile.ZIP_DEFLATED) as z_final:
+        for item in z_original.infolist():
+            datos = partes_nuevas.get(item.filename, z_original.read(item.filename))
+            z_final.writestr(item, datos)
+        for nombre_media, datos_media in media_nuevos.items():
+            z_final.writestr(nombre_media, datos_media)
+    buf_final.seek(0)
+    return buf_final.getvalue(), []
+
+
+def convertir_excel_a_pdf(bytes_excel):
+    """
+    Convierte el Excel ya generado a PDF usando LibreOffice en modo headless
+    (necesita que 'libreoffice' esté instalado en el servidor mediante
+    packages.txt). Devuelve los bytes del PDF, o None si la conversión falla
+    (por ejemplo si LibreOffice no está disponible en el entorno).
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as carpeta_temp:
+        ruta_xlsx = os.path.join(carpeta_temp, "reporte.xlsx")
+        with open(ruta_xlsx, "wb") as f:
+            f.write(bytes_excel)
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "pdf", "--outdir", carpeta_temp, ruta_xlsx],
+                check=True, timeout=120, capture_output=True
+            )
+        except Exception:
+            return None
+
+        ruta_pdf = os.path.join(carpeta_temp, "reporte.pdf")
+        if os.path.exists(ruta_pdf):
+            with open(ruta_pdf, "rb") as f:
+                return f.read()
+        return None
+
+
 def redimensionar_conservando_calidad(img, max_lado=1400):
     """
     Redimensiona una foto manteniendo su proporción original (nunca la
@@ -781,5 +1165,80 @@ else:
                 value=codigo_sugerido, 
                 key=f"bk_{rechazo['key_id']}"
             )
+
+st.markdown("---")
+st.header("5. Firma del Responsable de la Inspección")
+
+col_f1, col_f2 = st.columns(2)
+with col_f1:
+    nombre_realizado = st.text_input("Nombre de quien realiza la inspección:", key="firma_nombre")
+    fecha_firma = st.date_input("Fecha de firma:", value=fecha_insp, key="firma_fecha")
+with col_f2:
+    firma_archivo = st.file_uploader("Subir imagen de firma (PNG/JPG):", type=["png", "jpg", "jpeg"], key="firma_upload")
+    if firma_archivo:
+        st.image(firma_archivo, caption="Vista previa de la firma", width=250)
+
+st.markdown("---")
+st.header("6. Generar Reporte Final")
+
+RUTA_PLANTILLA = "plantilla_tolva.xlsx"
+nombre_archivo_base = f"{cod_informe}_{fecha_insp.strftime('%Y%m%d')}"
+
+if not os.path.exists(RUTA_PLANTILLA):
+    st.error(
+        f"⚠️ No se encontró el archivo '{RUTA_PLANTILLA}' en el proyecto. "
+        "Sube la plantilla original de Excel a la misma carpeta que app.py en GitHub "
+        "(con ese nombre exacto) para poder generar el reporte."
+    )
+else:
+    if st.button("📥 Generar Reporte", type="primary"):
+        with st.spinner("Generando el archivo Excel..."):
+            excel_bytes, zonas_sin_espacio = generar_reporte_excel(
+                ruta_plantilla=RUTA_PLANTILLA,
+                cliente=cliente, lugar=lugar, fecha_insp=fecha_insp,
+                cod_equipo=cod_equipo, cod_tolva=cod_tolva, horometro=horometro,
+                cod_informe=cod_informe, revision=revision, pm=pm,
+                estructura_zonas=ESTRUCTURA_ZONAS,
+                nombre_realizado=nombre_realizado, fecha_firma=fecha_firma,
+                firma_archivo=firma_archivo,
+                todos_los_rechazos=todos_los_rechazos
+            )
+        st.session_state["_ultimo_excel_generado"] = excel_bytes
+        st.success("✅ Reporte Excel generado correctamente (con bloques de foto creados automáticamente si alguna zona tuvo más de 2 hallazgos).")
+
+    if "_ultimo_excel_generado" in st.session_state:
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                label="💾 Descargar Excel",
+                data=st.session_state["_ultimo_excel_generado"],
+                file_name=f"{nombre_archivo_base}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        with col_dl2:
+            if st.button("📄 Convertir y Descargar PDF"):
+                with st.spinner("Convirtiendo a PDF... esto puede tardar un poco"):
+                    pdf_bytes = convertir_excel_a_pdf(st.session_state["_ultimo_excel_generado"])
+                if pdf_bytes:
+                    st.download_button(
+                        label="💾 Descargar PDF",
+                        data=pdf_bytes,
+                        file_name=f"{nombre_archivo_base}.pdf",
+                        mime="application/pdf"
+                    )
+                else:
+                    st.error(
+                        "⚠️ No se pudo convertir a PDF. Esto pasa si el servidor no tiene "
+                        "LibreOffice instalado (revisa que subiste el archivo 'packages.txt'). "
+                        "Mientras tanto, puedes abrir el Excel descargado y usar "
+                        "'Archivo > Exportar > Crear PDF/XPS' desde Excel o Google Sheets."
+                    )
+
+        st.caption(
+            "✅ Los logos y el formato original de la empresa se conservan intactos. "
+            "Si una zona tiene más de 2 hallazgos, se crean bloques de foto adicionales "
+            "automáticamente (mismo estilo/bordes que la plantilla). "
+            "⚠️ Pendiente: la matriz de espesores todavía no se inserta automáticamente."
+        )
 
 st.success("✔ Sistema sincronizado perfectamente con el formato de Tolvas CAT.")
