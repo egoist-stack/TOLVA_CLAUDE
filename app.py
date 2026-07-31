@@ -346,7 +346,7 @@ def _crear_header_fotos(ws, fila_insercion):
     ws.row_dimensions[fila_insercion].height = 25
     ws.merge_cells(start_row=fila_insercion, start_column=1, end_row=fila_insercion, end_column=4)
     ws.merge_cells(start_row=fila_insercion, start_column=5, end_row=fila_insercion, end_column=11)
-    ws.merge_cells(start_row=fila_insercion, start_column=12, end_row=fila_insercion, end_column=17)
+    ws.merge_cells(start_row=fila_insercion, start_column=12, end_row=fila_insercion, end_column=18)
     borde = Border(left=Side(style="thick"), right=Side(style="thick"), top=Side(style="thick"), bottom=Side(style="thick"))
     align = Alignment(horizontal="center", vertical="center")
     for col, texto in [(1, "DESCRIPCION"), (5, "PANORAMICO"), (12, "DETALLE")]:
@@ -369,7 +369,7 @@ def _crear_bloque_foto_nuevo(ws, fila_insercion, alto=8):
         ws.row_dimensions[r].height = 20
     ws.merge_cells(start_row=fila_insercion, start_column=1, end_row=fila_insercion + alto - 1, end_column=4)
     ws.merge_cells(start_row=fila_insercion, start_column=5, end_row=fila_insercion + alto - 1, end_column=11)
-    ws.merge_cells(start_row=fila_insercion, start_column=12, end_row=fila_insercion + alto - 1, end_column=17)
+    ws.merge_cells(start_row=fila_insercion, start_column=12, end_row=fila_insercion + alto - 1, end_column=18)
     borde = Border(left=Side(style="thick"), right=Side(style="thick"), top=Side(style="thick"), bottom=Side(style="thick"))
     align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for col in (1, 5, 12):
@@ -391,6 +391,33 @@ def _preparar_imagen_para_insertar(imagen_pil):
     buf = io.BytesIO()
     img_copia.save(buf, format="PNG")
     return buf.getvalue()
+
+def _calcular_presupuesto_pagina_pt(ws):
+    """Calcula cuántos 'puntos de alto de fila' caben realmente en una
+    página, usando el tamaño de papel, márgenes y escala REALES de la
+    plantilla (no un número inventado)."""
+    tamanos_papel_pt = {1: (612, 792), 9: (595, 842)}  # 1=Letter, 9=A4
+    ancho_pt, alto_pt = tamanos_papel_pt.get(ws.page_setup.paperSize, (595, 842))
+    if ws.page_setup.orientation == "landscape":
+        ancho_pt, alto_pt = alto_pt, ancho_pt
+    margenes = ws.page_margins
+    top_pt = (margenes.top or 0.75) * 72
+    bottom_pt = (margenes.bottom or 0.75) * 72
+    imprimible_pt = alto_pt - top_pt - bottom_pt
+    escala = (ws.page_setup.scale or 100) / 100
+    return imprimible_pt / escala
+
+
+def _altura_filas_pt(ws, fila_ini, fila_fin):
+    """Suma el alto real (en puntos) de un rango de filas."""
+    if fila_fin < fila_ini:
+        return 0
+    total = 0
+    for f in range(fila_ini, fila_fin + 1):
+        dim = ws.row_dimensions.get(f)
+        total += dim.height if (dim and dim.height) else 15
+    return total
+
 
 def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
     def reemplazar(m):
@@ -497,6 +524,12 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
 
     filas_headers_zonas = _detectar_headers_zonas(ws)
 
+    # --- Control de paginación real (llena cada página hasta donde entra
+    # de verdad, en vez de forzar un salto por cada bloque) ---
+    presupuesto_pagina_pt = _calcular_presupuesto_pagina_pt(ws)
+    altura_pagina_actual_pt = _altura_filas_pt(ws, 1, filas_headers_zonas[0] - 1)
+    fila_medida_hasta = filas_headers_zonas[0] - 1
+
     for idx_z, bloque_zona in enumerate(estructura_zonas):
         fila_header = filas_headers_zonas[idx_z] + desplazamiento
         fila_inicio_items = fila_header + 2
@@ -564,32 +597,45 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             fila_legend = fila_header + 2 + num_items
             punto_insercion = fila_legend + 1
 
-            # Forzar salto de página ANTES del encabezado de fotos, para que
-            # todo el bloque de fotos de la zona empiece en una hoja nueva.
-            ws.row_breaks.append(Break(id=punto_insercion - 1))
+            # Contar la altura de todo lo que hay entre la última medición
+            # y este punto (tabla de items + leyenda de esta zona, etc.)
+            altura_pagina_actual_pt += _altura_filas_pt(ws, fila_medida_hasta + 1, punto_insercion - 1)
+            fila_medida_hasta = punto_insercion - 1
+
+            altura_header_pt = 25  # alto fijo del encabezado de fotos
+            if altura_pagina_actual_pt + altura_header_pt > presupuesto_pagina_pt:
+                ws.row_breaks.append(Break(id=punto_insercion - 1))
+                altura_pagina_actual_pt = 0
 
             _crear_header_fotos(ws, punto_insercion)
             puntos_insercion.append((punto_insercion, 1))
             desplazamiento += 1
+            altura_pagina_actual_pt += altura_header_pt
             siguiente_fila_libre = punto_insercion + 1
+            fila_medida_hasta = punto_insercion
 
             alto_bloque = 8
+            altura_bloque_pt = alto_bloque * 20  # 20pt es el alto de fila que usamos para los bloques
 
             for rechazo in rechazos_zona:
-                # Salto de página ANTES de cada bloque individual: así nunca
-                # queda una foto/cuadro cortado entre dos páginas.
-                ws.row_breaks.append(Break(id=siguiente_fila_libre - 1))
+                # Solo se fuerza un salto de página si el bloque NO entra
+                # completo en el espacio que queda en la página actual.
+                if altura_pagina_actual_pt + altura_bloque_pt > presupuesto_pagina_pt:
+                    ws.row_breaks.append(Break(id=siguiente_fila_libre - 1))
+                    altura_pagina_actual_pt = 0
 
                 fila_ini, fila_fin = _crear_bloque_foto_nuevo(ws, siguiente_fila_libre, alto_bloque)
                 puntos_insercion.append((siguiente_fila_libre, alto_bloque))
                 desplazamiento += alto_bloque
+                altura_pagina_actual_pt += altura_bloque_pt
                 siguiente_fila_libre = fila_fin + 1
+                fila_medida_hasta = fila_fin
 
                 key_id = rechazo["key_id"]
                 texto_desc = f"ZONA {rechazo['zona']}\n{rechazo['descripcion'].upper()}\n\n{_NOMBRE_COMPLETO_DEFECTO.get(rechazo['defecto'], rechazo['defecto'])}"
                 ws.cell(row=fila_ini, column=1, value=texto_desc)
 
-                for prefijo_foto, col_0idx, col_span in (("pano", 4, 7), ("det", 11, 6)):
+                for prefijo_foto, col_0idx, col_span in (("pano", 4, 7), ("det", 11, 7)):
                     llave_base = f"img_{prefijo_foto}_{key_id}"
                     img_foto = obtener_img_state(llave_base)
                     if img_foto is not None:
@@ -602,12 +648,16 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                         })
 
             for oblig in bloques_obligatorios:
-                ws.row_breaks.append(Break(id=siguiente_fila_libre - 1))
+                if altura_pagina_actual_pt + altura_bloque_pt > presupuesto_pagina_pt:
+                    ws.row_breaks.append(Break(id=siguiente_fila_libre - 1))
+                    altura_pagina_actual_pt = 0
 
                 fila_ini, fila_fin = _crear_bloque_foto_nuevo(ws, siguiente_fila_libre, alto_bloque)
                 puntos_insercion.append((siguiente_fila_libre, alto_bloque))
                 desplazamiento += alto_bloque
+                altura_pagina_actual_pt += altura_bloque_pt
                 siguiente_fila_libre = fila_fin + 1
+                fila_medida_hasta = fila_fin
 
                 ws.cell(row=fila_ini, column=1, value=oblig["descripcion"])
                 ws.cell(row=fila_ini, column=12, value="-")  # Detalle siempre "-"
@@ -634,7 +684,10 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         codigo_sugerido = f"BK00{str(idx_ot + 1).zfill(5)}"
         codigo_backlog = st.session_state.get(f"bk_{rechazo['key_id']}", codigo_sugerido)
         texto_ot = f"{prefijo} {rechazo['descripcion']} ({rechazo['zona']}) - {codigo_backlog}"
-        try: ws.cell(row=fila_ot, column=1, value=texto_ot)
+        try:
+            celda_ot = ws.cell(row=fila_ot, column=1, value=texto_ot)
+            from openpyxl.styles import Alignment as _Alignment
+            celda_ot.alignment = _Alignment(horizontal="left", vertical="center", wrap_text=True)
         except: pass
         fila_ot += 1
 
@@ -1208,7 +1261,8 @@ st.header("5. Firma del Responsable de la Inspección")
 
 col_f1, col_f2 = st.columns(2)
 with col_f1:
-    nombre_realizado = st.text_input("Nombre de quien realiza la inspección:", key="firma_nombre")
+    opc_nombre = st.selectbox("Nombre de quien realiza la inspección:", ["Dennis Huamani", "[Entrada Manual]"], key="firma_nombre_select")
+    nombre_realizado = st.text_input("Nombre (manual):", value="Dennis Huamani", key="firma_nombre_input") if opc_nombre == "[Entrada Manual]" else opc_nombre
     fecha_firma = st.date_input("Fecha de firma:", value=fecha_insp, key="firma_fecha")
 with col_f2:
     firma_archivo = st.file_uploader("Subir imagen de firma (PNG/JPG):", type=["png", "jpg", "jpeg"], key="firma_upload")
