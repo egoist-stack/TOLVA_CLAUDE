@@ -347,13 +347,15 @@ def _crear_header_fotos(ws, fila_insercion):
     ws.merge_cells(start_row=fila_insercion, start_column=1, end_row=fila_insercion, end_column=4)
     ws.merge_cells(start_row=fila_insercion, start_column=5, end_row=fila_insercion, end_column=11)
     ws.merge_cells(start_row=fila_insercion, start_column=12, end_row=fila_insercion, end_column=17)
-    borde = Border(left=Side(style="medium"), right=Side(style="medium"), top=Side(style="medium"), bottom=Side(style="medium"))
+    borde = Border(left=Side(style="thick"), right=Side(style="thick"), top=Side(style="thick"), bottom=Side(style="thick"))
     align = Alignment(horizontal="center", vertical="center")
     for col, texto in [(1, "DESCRIPCION"), (5, "PANORAMICO"), (12, "DETALLE")]:
         c = ws.cell(row=fila_insercion, column=col, value=texto)
         c.font = Font(bold=True)
         c.alignment = align
-    for col in range(1, 18):
+    # Columna 18 (R) incluida: es el verdadero borde derecho del marco de la
+    # tabla (las columnas O, P, Q son espacio en blanco sin borde de por sí).
+    for col in range(1, 19):
         ws.cell(row=fila_insercion, column=col).border = borde
 
 
@@ -368,13 +370,19 @@ def _crear_bloque_foto_nuevo(ws, fila_insercion, alto=8):
     ws.merge_cells(start_row=fila_insercion, start_column=1, end_row=fila_insercion + alto - 1, end_column=4)
     ws.merge_cells(start_row=fila_insercion, start_column=5, end_row=fila_insercion + alto - 1, end_column=11)
     ws.merge_cells(start_row=fila_insercion, start_column=12, end_row=fila_insercion + alto - 1, end_column=17)
-    borde = Border(left=Side(style="medium"), right=Side(style="medium"), top=Side(style="medium"), bottom=Side(style="medium"))
+    borde = Border(left=Side(style="thick"), right=Side(style="thick"), top=Side(style="thick"), bottom=Side(style="thick"))
     align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for col in (1, 5, 12):
         c = ws.cell(row=fila_insercion, column=col)
         c.alignment = align
-    for col in range(1, 18):
-        ws.cell(row=fila_insercion, column=col).border = borde
+    # CORRECCIÓN: antes esto solo se aplicaba a la primera fila del bloque
+    # (por eso las líneas verticales entre las fotos se veían incompletas,
+    # cortadas a la altura de una sola fila en vez de bajar las 8 filas
+    # completas). Ahora se aplica a TODAS las filas del bloque, incluida la
+    # columna 18 (R) que cierra el marco derecho de la tabla.
+    for r in range(fila_insercion, fila_insercion + alto):
+        for col in range(1, 19):
+            ws.cell(row=r, column=col).border = borde
     return (fila_insercion, fila_insercion + alto - 1)
 
 def _preparar_imagen_para_insertar(imagen_pil):
@@ -438,6 +446,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                            todos_los_rechazos, matriz_espesores=None):
     
     import openpyxl
+    from openpyxl.worksheet.pagebreak import Break
     import zipfile
     from openpyxl.styles import Font
 
@@ -555,6 +564,10 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             fila_legend = fila_header + 2 + num_items
             punto_insercion = fila_legend + 1
 
+            # Forzar salto de página ANTES del encabezado de fotos, para que
+            # todo el bloque de fotos de la zona empiece en una hoja nueva.
+            ws.row_breaks.append(Break(id=punto_insercion - 1))
+
             _crear_header_fotos(ws, punto_insercion)
             puntos_insercion.append((punto_insercion, 1))
             desplazamiento += 1
@@ -563,6 +576,10 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             alto_bloque = 8
 
             for rechazo in rechazos_zona:
+                # Salto de página ANTES de cada bloque individual: así nunca
+                # queda una foto/cuadro cortado entre dos páginas.
+                ws.row_breaks.append(Break(id=siguiente_fila_libre - 1))
+
                 fila_ini, fila_fin = _crear_bloque_foto_nuevo(ws, siguiente_fila_libre, alto_bloque)
                 puntos_insercion.append((siguiente_fila_libre, alto_bloque))
                 desplazamiento += alto_bloque
@@ -585,6 +602,8 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                         })
 
             for oblig in bloques_obligatorios:
+                ws.row_breaks.append(Break(id=siguiente_fila_libre - 1))
+
                 fila_ini, fila_fin = _crear_bloque_foto_nuevo(ws, siguiente_fila_libre, alto_bloque)
                 puntos_insercion.append((siguiente_fila_libre, alto_bloque))
                 desplazamiento += alto_bloque
@@ -646,6 +665,15 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         ws.sheet_properties.pageSetUpPr = PageSetupProperties()
     ws.sheet_properties.pageSetUpPr.fitToPage = False
 
+    # --- CORRECCIÓN DE ÁREA DE IMPRESIÓN ---
+    # El área de impresión original termina en la fila donde antes estaba
+    # la firma (fila 162). Como se insertaron filas nuevas (bloques de foto),
+    # hay que estirar el área de impresión esa misma cantidad para que
+    # llegue hasta el final real de la hoja (incluyendo firmas).
+    fila_final_original = 162
+    fila_final_nueva = fila_final_original + desplazamiento
+    ws.print_area = f"A1:R{fila_final_nueva}"
+
     buf_temp = io.BytesIO()
     wb.save(buf_temp)
     buf_temp.seek(0)
@@ -659,7 +687,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     if not match_drawing:
         match_drawing = re.search(r'<[a-zA-Z0-9]*:?drawing r:id=".*?">.*?</[a-zA-Z0-9]*:?drawing>', sheet1_original)
 
-    for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml']:
+    # 'xl/workbook.xml' es DONDE REALMENTE VIVE el área de impresión (como un
+    # "nombre definido" _xlnm.Print_Area) — no dentro de sheet1.xml como
+    # cabría esperar. Por eso antes el área de impresión no se actualizaba:
+    # nunca estábamos tocando ese archivo.
+    for nombre in ['xl/worksheets/sheet1.xml', 'xl/sharedStrings.xml', 'xl/styles.xml', 'xl/workbook.xml']:
         if nombre in z_temp.namelist():
             xml_data = z_temp.read(nombre).decode('utf-8')
             if nombre == 'xl/worksheets/sheet1.xml':
