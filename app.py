@@ -511,29 +511,39 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P7"] = pm
 
     # --- MEDICIÓN DE ESPESORES ---
+    matriz_espesores_omitida = False
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
-        fila_inicio_matriz = 15 
-        col_inicio_matriz = 3   
-        
-        encontrado = False
+        fila_inicio_matriz = None
+        col_inicio_matriz = None
+
         for r in range(1, 100):
             for c in range(1, 15):
                 val = str(ws.cell(row=r, column=c).value).upper()
                 if "ESPESORES DE PISO" in val or "PUNTO 1" in val:
                     fila_inicio_matriz = r + 2
                     col_inicio_matriz = c
-                    encontrado = True
                     break
-            if encontrado:
+            if fila_inicio_matriz is not None:
                 break
-        
-        for i in range(8):
-            for j in range(7):
-                valor = matriz_espesores.iloc[i, j]
-                ws.cell(row=fila_inicio_matriz + i, column=col_inicio_matriz + j, value=valor)
-                
-        if (matriz_espesores == "-").all().all():
-            ws.cell(row=fila_inicio_matriz - 1, column=col_inicio_matriz, value="NO SE REALIZÓ MEDICIÓN DE ESPESORES")
+
+        if fila_inicio_matriz is None:
+            # No se encontró el marcador "ESPESORES DE PISO" en la plantilla
+            # (parece que se borró al limpiarla). Se omite esta sección en
+            # vez de arriesgar a tumbar TODO el reporte por esto.
+            matriz_espesores_omitida = True
+        else:
+            try:
+                for i in range(8):
+                    for j in range(7):
+                        valor = matriz_espesores.iloc[i, j]
+                        ws.cell(row=fila_inicio_matriz + i, column=col_inicio_matriz + j, value=valor)
+                if (matriz_espesores == "-").all().all():
+                    ws.cell(row=fila_inicio_matriz - 1, column=col_inicio_matriz, value="NO SE REALIZÓ MEDICIÓN DE ESPESORES")
+            except Exception:
+                # Si la zona encontrada tiene celdas combinadas que no
+                # coinciden con una grilla simple, tampoco se debe tumbar
+                # el reporte completo por esto.
+                matriz_espesores_omitida = True
 
     desplazamiento = 0
     puntos_insercion = []
@@ -848,7 +858,14 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         for nombre_media, datos_media in media_nuevos.items():
             z_final.writestr(nombre_media, datos_media)
     buf_final.seek(0)
-    return buf_final.getvalue(), []
+    avisos = []
+    if matriz_espesores_omitida:
+        avisos.append(
+            "⚠️ No se pudo colocar la matriz de espesores en el Excel: no se encontró "
+            "el marcador 'ESPESORES DE PISO' en la plantilla (parece que se borró al "
+            "limpiarla). El resto del reporte se generó con normalidad."
+        )
+    return buf_final.getvalue(), avisos
 
 def convertir_excel_a_pdf(bytes_excel):
     import subprocess
@@ -1325,7 +1342,7 @@ if not os.path.exists(RUTA_PLANTILLA):
 else:
     if st.button("📥 Generar Reporte", type="primary"):
         with st.spinner("Generando el archivo Excel..."):
-            excel_bytes, zonas_sin_espacio = generar_reporte_excel(
+            excel_bytes, avisos_generacion = generar_reporte_excel(
                 ruta_plantilla=RUTA_PLANTILLA,
                 cliente=cliente, lugar=lugar, fecha_insp=fecha_insp,
                 cod_equipo=cod_equipo, cod_tolva=cod_tolva, horometro=horometro,
@@ -1338,6 +1355,8 @@ else:
             )
         st.session_state["_ultimo_excel_generado"] = excel_bytes
         st.success("✅ Reporte Excel generado correctamente.")
+        for aviso in avisos_generacion:
+            st.warning(aviso)
 
     if "_ultimo_excel_generado" in st.session_state:
         col_dl1, col_dl2 = st.columns(2)
