@@ -387,6 +387,12 @@ def _crear_bloque_foto_nuevo(ws, fila_insercion, alto=8):
 
 def _preparar_imagen_para_insertar(imagen_pil):
     img_copia = imagen_pil.copy().convert("RGB")
+    # Los recuadros de Panorámico/Detalle son mucho más anchos que altos.
+    # Si la foto es vertical (más alta que ancha, típico de una foto de
+    # celular sin girar), se gira 90° para que quede horizontal y encaje
+    # en el recuadro sin aplastarse/deformarse.
+    if img_copia.height > img_copia.width:
+        img_copia = img_copia.transpose(Image.ROTATE_90)
     img_copia.thumbnail((1200, 1200), Image.LANCZOS)
     buf = io.BytesIO()
     img_copia.save(buf, format="PNG")
@@ -419,13 +425,37 @@ def _altura_filas_pt(ws, fila_ini, fila_fin):
     return total
 
 
-def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad):
-    def reemplazar(m):
-        fila = int(m.group(2))
-        if fila >= fila_insercion_0idx:
-            fila += cantidad
-        return f"{m.group(1)}{fila}{m.group(3)}"
-    return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar, xml_texto)
+def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad, altura_insertada_emu=0):
+    """Desplaza las imágenes/formas originales que quedaron debajo de un
+    punto donde se insertaron filas nuevas. IMPORTANTE: las FORMAS (cuadros
+    de texto como 'ZONA 06') no solo usan el ancla de fila/columna — también
+    cargan una coordenada absoluta interna (a:off y) que Excel puede usar
+    para ubicarlas. Si solo se ajusta el ancla y no ese offset, la forma
+    queda desalineada del diagrama al que pertenece. Aquí se ajustan ambos,
+    bloque por bloque (no con un reemplazo global de todo el XML)."""
+    def procesar_anchor(m):
+        bloque = m.group(0)
+
+        def reemplazar_row(m2):
+            fila = int(m2.group(2))
+            if fila >= fila_insercion_0idx:
+                fila += cantidad
+            return f"{m2.group(1)}{fila}{m2.group(3)}"
+
+        primera_fila_match = re.search(r'<xdr:from>.*?<xdr:row>(\d+)</xdr:row>', bloque, re.DOTALL)
+        necesita_desplazarse = bool(primera_fila_match) and int(primera_fila_match.group(1)) >= fila_insercion_0idx
+
+        bloque_nuevo = re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar_row, bloque)
+
+        if necesita_desplazarse and altura_insertada_emu:
+            def reemplazar_offset_y(m3):
+                y_nuevo = int(m3.group(2)) + altura_insertada_emu
+                return f'{m3.group(1)}{y_nuevo}{m3.group(3)}'
+            bloque_nuevo = re.sub(r'(<a:off x="-?\d+" y=")(-?\d+)(")', reemplazar_offset_y, bloque_nuevo)
+
+        return bloque_nuevo
+
+    return re.sub(r'<xdr:twoCellAnchor.*?</xdr:twoCellAnchor>', procesar_anchor, xml_texto, flags=re.DOTALL)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
     # Margen de seguridad de ~3 milímetros (100000 EMUs) para NO INVADIR las líneas de la tabla
@@ -526,6 +556,12 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
 
     # --- Control de paginación real (llena cada página hasta donde entra
     # de verdad, en vez de forzar un salto por cada bloque) ---
+    # Los saltos de página ORIGINALES de la plantilla (fijos) ya no sirven:
+    # después de insertar filas dinámicamente, esas posiciones fijas caen en
+    # cualquier lugar (a veces justo cortando una tabla). Se descartan por
+    # completo y se reconstruyen todos desde cero con el algoritmo de abajo.
+    ws.row_breaks.brk = []
+
     presupuesto_pagina_pt = _calcular_presupuesto_pagina_pt(ws)
     altura_pagina_actual_pt = _altura_filas_pt(ws, 1, filas_headers_zonas[0] - 1)
     fila_medida_hasta = filas_headers_zonas[0] - 1
@@ -534,6 +570,23 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         fila_header = filas_headers_zonas[idx_z] + desplazamiento
         fila_inicio_items = fila_header + 2
         num_items = len(bloque_zona["items"])
+
+        # --- Proteger título + encabezado + tabla completa de la zona como
+        # una unidad que NUNCA se debe partir entre dos páginas (título en
+        # una hoja y datos en otra es justo lo que se reportó como error) ---
+        fila_titulo_zona = fila_header - 2
+        fila_legend_zona = fila_header + 2 + num_items
+        altura_tabla_zona_pt = _altura_filas_pt(ws, fila_titulo_zona, fila_legend_zona)
+
+        altura_pagina_actual_pt += _altura_filas_pt(ws, fila_medida_hasta + 1, fila_titulo_zona - 1)
+        fila_medida_hasta = fila_titulo_zona - 1
+
+        if altura_pagina_actual_pt + altura_tabla_zona_pt > presupuesto_pagina_pt:
+            ws.row_breaks.append(Break(id=fila_titulo_zona - 1))
+            altura_pagina_actual_pt = 0
+
+        altura_pagina_actual_pt += altura_tabla_zona_pt
+        fila_medida_hasta = fila_legend_zona
 
         for idx_i, item in enumerate(bloque_zona["items"]):
             cod_z, desc_z, tec_def = item
@@ -608,7 +661,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 altura_pagina_actual_pt = 0
 
             _crear_header_fotos(ws, punto_insercion)
-            puntos_insercion.append((punto_insercion, 1))
+            puntos_insercion.append((punto_insercion, 1, altura_header_pt))
             desplazamiento += 1
             altura_pagina_actual_pt += altura_header_pt
             siguiente_fila_libre = punto_insercion + 1
@@ -625,7 +678,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     altura_pagina_actual_pt = 0
 
                 fila_ini, fila_fin = _crear_bloque_foto_nuevo(ws, siguiente_fila_libre, alto_bloque)
-                puntos_insercion.append((siguiente_fila_libre, alto_bloque))
+                puntos_insercion.append((siguiente_fila_libre, alto_bloque, altura_bloque_pt))
                 desplazamiento += alto_bloque
                 altura_pagina_actual_pt += altura_bloque_pt
                 siguiente_fila_libre = fila_fin + 1
@@ -653,7 +706,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                     altura_pagina_actual_pt = 0
 
                 fila_ini, fila_fin = _crear_bloque_foto_nuevo(ws, siguiente_fila_libre, alto_bloque)
-                puntos_insercion.append((siguiente_fila_libre, alto_bloque))
+                puntos_insercion.append((siguiente_fila_libre, alto_bloque, altura_bloque_pt))
                 desplazamiento += alto_bloque
                 altura_pagina_actual_pt += altura_bloque_pt
                 siguiente_fila_libre = fila_fin + 1
@@ -762,8 +815,9 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
 
-    for fila_insercion, cantidad in puntos_insercion:
-        drawing1_xml = _desplazar_filas_drawing_xml(drawing1_xml, fila_insercion - 1, cantidad)
+    for fila_insercion, cantidad, altura_pt in puntos_insercion:
+        altura_emu = int(altura_pt * 12700)  # 1 punto = 12700 EMU
+        drawing1_xml = _desplazar_filas_drawing_xml(drawing1_xml, fila_insercion - 1, cantidad, altura_emu)
 
     rids_existentes = re.findall(r'Id="rId(\d+)"', drawing1_rels)
     siguiente_rid = max((int(r) for r in rids_existentes), default=0) + 1
