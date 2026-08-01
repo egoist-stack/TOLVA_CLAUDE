@@ -427,35 +427,22 @@ def _altura_filas_pt(ws, fila_ini, fila_fin):
 
 def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad, altura_insertada_emu=0):
     """Desplaza las imágenes/formas originales que quedaron debajo de un
-    punto donde se insertaron filas nuevas. IMPORTANTE: las FORMAS (cuadros
-    de texto como 'ZONA 06') no solo usan el ancla de fila/columna — también
-    cargan una coordenada absoluta interna (a:off y) que Excel puede usar
-    para ubicarlas. Si solo se ajusta el ancla y no ese offset, la forma
-    queda desalineada del diagrama al que pertenece. Aquí se ajustan ambos,
-    bloque por bloque (no con un reemplazo global de todo el XML)."""
-    def procesar_anchor(m):
-        bloque = m.group(0)
+    punto donde se insertaron filas nuevas, ajustando solo el ancla de
+    fila/columna.
+    NOTA: se intentó además corregir la coordenada absoluta interna (a:off)
+    de las formas para arreglar el desalineado de 'ZONA 06', pero eso
+    rompió los esquemas de zona en general: son GRUPOS de varias formas
+    (imagen 3D + cajitas numeradas + líneas) con coordenadas internas
+    relativas al grupo, y mover esas coordenadas a ciegas descuadra todo
+    el grupo por dentro. Revertido — solo se toca el ancla de fila/columna,
+    que es lo que se ha comprobado que funciona bien de forma consistente."""
+    def reemplazar_row(m):
+        fila = int(m.group(2))
+        if fila >= fila_insercion_0idx:
+            fila += cantidad
+        return f"{m.group(1)}{fila}{m.group(3)}"
 
-        def reemplazar_row(m2):
-            fila = int(m2.group(2))
-            if fila >= fila_insercion_0idx:
-                fila += cantidad
-            return f"{m2.group(1)}{fila}{m2.group(3)}"
-
-        primera_fila_match = re.search(r'<xdr:from>.*?<xdr:row>(\d+)</xdr:row>', bloque, re.DOTALL)
-        necesita_desplazarse = bool(primera_fila_match) and int(primera_fila_match.group(1)) >= fila_insercion_0idx
-
-        bloque_nuevo = re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar_row, bloque)
-
-        if necesita_desplazarse and altura_insertada_emu:
-            def reemplazar_offset_y(m3):
-                y_nuevo = int(m3.group(2)) + altura_insertada_emu
-                return f'{m3.group(1)}{y_nuevo}{m3.group(3)}'
-            bloque_nuevo = re.sub(r'(<a:off x="-?\d+" y=")(-?\d+)(")', reemplazar_offset_y, bloque_nuevo)
-
-        return bloque_nuevo
-
-    return re.sub(r'<xdr:twoCellAnchor.*?</xdr:twoCellAnchor>', procesar_anchor, xml_texto, flags=re.DOTALL)
+    return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar_row, xml_texto)
 
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
     # Margen de seguridad de ~3 milímetros (100000 EMUs) para NO INVADIR las líneas de la tabla
