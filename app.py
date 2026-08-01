@@ -511,38 +511,65 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     ws["P7"] = pm
 
     # --- MEDICIÓN DE ESPESORES ---
+    # Se construye desde cero entre las columnas K y R (junto al esquema de
+    # Zona 1), porque ese espacio vive dentro de UNA sola celda combinada
+    # gigante (el fondo del esquema). Hay que partir esa combinación sin
+    # tocar la zona donde está la imagen del diagrama (columnas A-J).
     matriz_espesores_omitida = False
     if pm in ["1000H", "2000H"] and matriz_espesores is not None:
-        fila_inicio_matriz = None
-        col_inicio_matriz = None
+        from openpyxl.styles import Font, Alignment, Border, Side
 
-        for r in range(1, 100):
-            for c in range(1, 15):
-                val = str(ws.cell(row=r, column=c).value).upper()
-                if "ESPESORES DE PISO" in val or "PUNTO 1" in val:
-                    fila_inicio_matriz = r + 2
-                    col_inicio_matriz = c
-                    break
-            if fila_inicio_matriz is not None:
+        merge_fondo_diagrama = None
+        for mc in ws.merged_cells.ranges:
+            if mc.min_col == 1 and mc.max_col >= 18 and 8 <= mc.min_row <= 10 and (mc.max_row - mc.min_row) >= 10:
+                merge_fondo_diagrama = mc
                 break
 
-        if fila_inicio_matriz is None:
-            # No se encontró el marcador "ESPESORES DE PISO" en la plantilla
-            # (parece que se borró al limpiarla). Se omite esta sección en
-            # vez de arriesgar a tumbar TODO el reporte por esto.
+        if merge_fondo_diagrama is None:
             matriz_espesores_omitida = True
         else:
             try:
+                fila_ini_fondo = merge_fondo_diagrama.min_row
+                fila_fin_fondo = merge_fondo_diagrama.max_row
+                ws.unmerge_cells(str(merge_fondo_diagrama))
+                # Se re-combina solo la parte donde vive el dibujo (A a J),
+                # dejando K en adelante libre para la matriz.
+                ws.merge_cells(start_row=fila_ini_fondo, start_column=1, end_row=fila_fin_fondo, end_column=10)
+
+                fila_matriz = fila_ini_fondo
+                col_matriz = 11  # K
+                borde = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
+                align = Alignment(horizontal="center", vertical="center")
+
+                # Esquina vacía + encabezado de columnas (1 a 7)
+                ws.cell(row=fila_matriz, column=col_matriz).border = borde
+                for j in range(7):
+                    c = ws.cell(row=fila_matriz, column=col_matriz + 1 + j, value=j + 1)
+                    c.font = Font(bold=True)
+                    c.alignment = align
+                    c.border = borde
+
+                # Filas de datos (1 a 8), con su número a la izquierda
                 for i in range(8):
+                    fila = fila_matriz + 1 + i
+                    c_label = ws.cell(row=fila, column=col_matriz, value=i + 1)
+                    c_label.font = Font(bold=True)
+                    c_label.alignment = align
+                    c_label.border = borde
                     for j in range(7):
                         valor = matriz_espesores.iloc[i, j]
-                        ws.cell(row=fila_inicio_matriz + i, column=col_inicio_matriz + j, value=valor)
+                        c = ws.cell(row=fila, column=col_matriz + 1 + j, value=valor)
+                        c.alignment = align
+                        c.border = borde
+                    ws.row_dimensions[fila].height = 18
+
+                ws.row_dimensions[fila_matriz].height = 18
+
                 if (matriz_espesores == "-").all().all():
-                    ws.cell(row=fila_inicio_matriz - 1, column=col_inicio_matriz, value="NO SE REALIZÓ MEDICIÓN DE ESPESORES")
+                    nota = ws.cell(row=fila_matriz + 9, column=col_matriz, value="NO SE REALIZÓ MEDICIÓN DE ESPESORES")
+                    ws.merge_cells(start_row=fila_matriz + 9, start_column=col_matriz, end_row=fila_matriz + 9, end_column=18)
+                    nota.font = Font(bold=True, color="FF0000")
             except Exception:
-                # Si la zona encontrada tiene celdas combinadas que no
-                # coinciden con una grilla simple, tampoco se debe tumbar
-                # el reporte completo por esto.
                 matriz_espesores_omitida = True
 
     desplazamiento = 0
