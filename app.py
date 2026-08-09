@@ -536,10 +536,28 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 # dejando K en adelante libre para la matriz.
                 ws.merge_cells(start_row=fila_ini_fondo, start_column=1, end_row=fila_fin_fondo, end_column=10)
 
-                fila_matriz = fila_ini_fondo
                 col_matriz = 11  # K
                 borde = Border(left=Side(style="thin"), right=Side(style="thin"), top=Side(style="thin"), bottom=Side(style="thin"))
+                borde_titulo = Border(left=Side(style="medium"), right=Side(style="medium"), top=Side(style="medium"), bottom=Side(style="medium"))
                 align = Alignment(horizontal="center", vertical="center")
+
+                # Centrar verticalmente todo el bloque (título + matriz) en
+                # el mismo alto que ocupa el esquema de Zona 1 al costado.
+                alto_disponible = fila_fin_fondo - fila_ini_fondo + 1  # 19 filas típicamente
+                alto_bloque_matriz = 10  # 1 fila de título + 1 de encabezado + 8 de datos
+                offset_centrado = max(0, (alto_disponible - alto_bloque_matriz) // 2)
+                fila_titulo_espesores = fila_ini_fondo + offset_centrado
+
+                # Título "ESPESORES DE PISO" (mismo estilo que el recuadro "ZONA 01")
+                ws.merge_cells(start_row=fila_titulo_espesores, start_column=col_matriz, end_row=fila_titulo_espesores, end_column=col_matriz + 3)
+                c_titulo = ws.cell(row=fila_titulo_espesores, column=col_matriz, value="ESPESORES DE PISO")
+                c_titulo.font = Font(bold=True)
+                c_titulo.alignment = align
+                for col in range(col_matriz, col_matriz + 4):
+                    ws.cell(row=fila_titulo_espesores, column=col).border = borde_titulo
+                ws.row_dimensions[fila_titulo_espesores].height = 20
+
+                fila_matriz = fila_titulo_espesores + 1
 
                 # Esquina vacía + encabezado de columnas (1 a 7)
                 ws.cell(row=fila_matriz, column=col_matriz).border = borde
@@ -589,28 +607,35 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     presupuesto_pagina_pt = _calcular_presupuesto_pagina_pt(ws)
     altura_pagina_actual_pt = _altura_filas_pt(ws, 1, filas_headers_zonas[0] - 1)
     fila_medida_hasta = filas_headers_zonas[0] - 1
+    fila_legend_zona_anterior = None
 
     for idx_z, bloque_zona in enumerate(estructura_zonas):
         fila_header = filas_headers_zonas[idx_z] + desplazamiento
         fila_inicio_items = fila_header + 2
         num_items = len(bloque_zona["items"])
 
-        # --- Proteger título + encabezado + tabla completa de la zona como
-        # una unidad que NUNCA se debe partir entre dos páginas (título en
-        # una hoja y datos en otra es justo lo que se reportó como error) ---
-        fila_titulo_zona = fila_header - 2
+        # --- Proteger diagrama-previo + título + encabezado + tabla como
+        # una unidad que NUNCA se debe partir entre dos páginas. El esquema
+        # de cada zona vive PEGADO AL FINAL de la zona anterior (entre su
+        # leyenda y el título de esta zona) — si no se protege desde ahí,
+        # el salto puede caer en medio del esquema en vez de antes de él.
+        if fila_legend_zona_anterior is not None:
+            fila_proteccion_inicio = fila_legend_zona_anterior + 1
+        else:
+            fila_proteccion_inicio = fila_header - 2  # Zona 1: no hay zona anterior
         fila_legend_zona = fila_header + 2 + num_items
-        altura_tabla_zona_pt = _altura_filas_pt(ws, fila_titulo_zona, fila_legend_zona)
+        altura_tabla_zona_pt = _altura_filas_pt(ws, fila_proteccion_inicio, fila_legend_zona)
 
-        altura_pagina_actual_pt += _altura_filas_pt(ws, fila_medida_hasta + 1, fila_titulo_zona - 1)
-        fila_medida_hasta = fila_titulo_zona - 1
+        altura_pagina_actual_pt += _altura_filas_pt(ws, fila_medida_hasta + 1, fila_proteccion_inicio - 1)
+        fila_medida_hasta = fila_proteccion_inicio - 1
 
         if altura_pagina_actual_pt + altura_tabla_zona_pt > presupuesto_pagina_pt:
-            ws.row_breaks.append(Break(id=fila_titulo_zona - 1))
+            ws.row_breaks.append(Break(id=fila_proteccion_inicio - 1))
             altura_pagina_actual_pt = 0
 
         altura_pagina_actual_pt += altura_tabla_zona_pt
         fila_medida_hasta = fila_legend_zona
+        fila_legend_zona_anterior = fila_legend_zona
 
         for idx_i, item in enumerate(bloque_zona["items"]):
             cod_z, desc_z, tec_def = item
@@ -752,6 +777,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
 
     # --- ZONAS A REPARAR (OTs) ---
     fila_ot = 148 + desplazamiento
+    # La sección final (OTs + firmas) siempre debe empezar en una hoja
+    # nueva, sin importar si cabría en la página anterior. El salto va
+    # ANTES del título "ZONAS A REPARAR" (fila_ot - 1), no antes de la
+    # primera línea de OT, para que el título no se quede solo atrás.
+    ws.row_breaks.append(Break(id=fila_ot - 2))
     fila_ot_max = 155 + desplazamiento
     for idx_ot, rechazo in enumerate(todos_los_rechazos):
         if fila_ot > fila_ot_max:
