@@ -907,10 +907,12 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
 
     # Ajuste puntual y ya verificado como seguro (formas sueltas, sin grupo,
-    # sin flecha asociada): "ZONA 06/07/08" median 0.832cm de alto contra
-    # ~1.08cm del resto de títulos de zona. Se emparejan a 0.9cm.
+    # sin flecha asociada): "ZONA 06/07/08" medían 0.832cm de alto contra
+    # ~1.09cm del resto de títulos de zona (misma fuente 16pt en las 8).
+    # Se igualan EXACTO a 393247 EMU (1.092cm), el valor real que ya usan
+    # ZONA 01/02/03/04/05 y que sabemos que sí funciona bien.
     for texto_zona in ("ZONA 06", "ZONA 07", "ZONA 08"):
-        drawing1_xml = _ajustar_altura_forma_por_texto(drawing1_xml, texto_zona, 324000)
+        drawing1_xml = _ajustar_altura_forma_por_texto(drawing1_xml, texto_zona, 393247)
 
     for fila_insercion, cantidad, altura_pt in puntos_insercion:
         altura_emu = int(altura_pt * 12700)  # 1 punto = 12700 EMU
