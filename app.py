@@ -444,6 +444,43 @@ def _desplazar_filas_drawing_xml(xml_texto, fila_insercion_0idx, cantidad, altur
 
     return re.sub(r'(<[a-zA-Z0-9]*:?row>)(\d+)(</[a-zA-Z0-9]*:?row>)', reemplazar_row, xml_texto)
 
+
+def _ajustar_altura_forma_por_texto(xml_texto, texto_objetivo, nueva_altura_emu):
+    """
+    Ajusta la altura (a:ext cy y xdr:to rowOff) de UNA forma específica,
+    identificada por su texto exacto. Solo se usa con formas ya confirmadas
+    como independientes (sin grupo, sin flecha asociada) para no repetir el
+    problema de mover coordenadas internas de formas agrupadas.
+    """
+    def procesar_anchor(m):
+        bloque = m.group(0)
+        m_texto = re.search(r'<a:t>([^<]*)</a:t>', bloque)
+        if not m_texto or m_texto.group(1).strip() != texto_objetivo:
+            return bloque
+        if '<xdr:grpSp>' in bloque:
+            return bloque  # seguridad extra: nunca tocar si resulta ser un grupo
+
+        m_from_off = re.search(r'<xdr:from>.*?<xdr:rowOff>(\d+)</xdr:rowOff></xdr:from>', bloque, re.DOTALL)
+        if not m_from_off:
+            return bloque
+        from_rowoff = int(m_from_off.group(1))
+        nuevo_to_rowoff = from_rowoff + nueva_altura_emu
+
+        bloque_nuevo = re.sub(
+            r'(<xdr:to>.*?<xdr:rowOff>)\d+(</xdr:rowOff></xdr:to>)',
+            lambda mm: f"{mm.group(1)}{nuevo_to_rowoff}{mm.group(2)}",
+            bloque, count=1, flags=re.DOTALL
+        )
+        bloque_nuevo = re.sub(
+            r'(<a:ext cx="\d+" cy=")\d+(")',
+            lambda mm: f"{mm.group(1)}{nueva_altura_emu}{mm.group(2)}",
+            bloque_nuevo, count=1
+        )
+        return bloque_nuevo
+
+    return re.sub(r'<xdr:twoCellAnchor.*?</xdr:twoCellAnchor>', procesar_anchor, xml_texto, flags=re.DOTALL)
+
+
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
     # Margen de seguridad de ~3 milímetros (100000 EMUs) para NO INVADIR las líneas de la tabla
     margen = 100000
@@ -868,6 +905,12 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
 
     drawing1_xml = z_original.read('xl/drawings/drawing1.xml').decode('utf-8')
     drawing1_rels = z_original.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
+
+    # Ajuste puntual y ya verificado como seguro (formas sueltas, sin grupo,
+    # sin flecha asociada): "ZONA 06/07/08" median 0.832cm de alto contra
+    # ~1.08cm del resto de títulos de zona. Se emparejan a 0.9cm.
+    for texto_zona in ("ZONA 06", "ZONA 07", "ZONA 08"):
+        drawing1_xml = _ajustar_altura_forma_por_texto(drawing1_xml, texto_zona, 324000)
 
     for fila_insercion, cantidad, altura_pt in puntos_insercion:
         altura_emu = int(altura_pt * 12700)  # 1 punto = 12700 EMU
