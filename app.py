@@ -481,6 +481,30 @@ def _ajustar_altura_forma_por_texto(xml_texto, texto_objetivo, nueva_altura_emu)
     return re.sub(r'<xdr:twoCellAnchor.*?</xdr:twoCellAnchor>', procesar_anchor, xml_texto, flags=re.DOTALL)
 
 
+def _estandarizar_cajas_de_puntos(xml_texto, nuevo_cx_emu, nuevo_cy_emu):
+    """
+    Estandariza el tamaño de TODAS las cajitas de punto de inspección
+    ("6.1", "8.3", "1.10", etc.) en todos los esquemas. Se confirmó que
+    estas son formas independientes (<xdr:sp>), hermanas de su flecha
+    dentro del mismo grupo, NO ancladas juntas. Se ajusta SOLO el a:ext
+    (tamaño propio de cada caja) — nunca su a:off (posición), ni el grupo,
+    ni la flecha — para no repetir el problema de las coordenadas internas.
+    """
+    def procesar_shape(m):
+        bloque = m.group(0)
+        m_texto = re.search(r'<a:t>([^<]*)</a:t>', bloque)
+        if not m_texto or not re.match(r'^\d+\.\d+$', m_texto.group(1).strip()):
+            return bloque
+        bloque_nuevo = re.sub(
+            r'<a:ext cx="\d+" cy="\d+"/>',
+            f'<a:ext cx="{nuevo_cx_emu}" cy="{nuevo_cy_emu}"/>',
+            bloque, count=1
+        )
+        return bloque_nuevo
+
+    return re.sub(r'<xdr:sp\s.*?</xdr:sp>', procesar_shape, xml_texto, flags=re.DOTALL)
+
+
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
     # Margen de seguridad de ~3 milímetros (100000 EMUs) para NO INVADIR las líneas de la tabla
     margen = 100000
@@ -913,6 +937,12 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     # ZONA 01/02/03/04/05 y que sabemos que sí funciona bien.
     for texto_zona in ("ZONA 06", "ZONA 07", "ZONA 08"):
         drawing1_xml = _ajustar_altura_forma_por_texto(drawing1_xml, texto_zona, 393247)
+
+    # Estandarizar TODAS las cajitas de punto de inspección (6.1, 8.3, 1.10,
+    # etc.) a un tamaño único que le queda cómodo hasta a las etiquetas más
+    # largas (ej. "3.10", "1.10"). Confirmado seguro: son formas sueltas,
+    # solo se toca su propio tamaño, nunca su posición ni la flecha.
+    drawing1_xml = _estandarizar_cajas_de_puntos(drawing1_xml, 495000, 270000)
 
     for fila_insercion, cantidad, altura_pt in puntos_insercion:
         altura_emu = int(altura_pt * 12700)  # 1 punto = 12700 EMU
