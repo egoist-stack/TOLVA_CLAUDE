@@ -505,6 +505,42 @@ def _estandarizar_cajas_de_puntos(xml_texto, nuevo_cx_emu, nuevo_cy_emu):
     return re.sub(r'<xdr:sp\s.*?</xdr:sp>', procesar_shape, xml_texto, flags=re.DOTALL)
 
 
+def _quitar_anchors_en_ventana(xml_texto, fila_ini_0idx, fila_fin_0idx):
+    """Elimina todos los objetos de dibujo (imagen 3D + flechas + cajitas)
+    cuya fila de inicio cae dentro de la ventana indicada. Se usa para
+    limpiar el esquema vectorial problemático de una zona antes de poner
+    en su lugar la imagen plana de reemplazo."""
+    anchors = re.findall(r'<xdr:twoCellAnchor.*?</xdr:twoCellAnchor>', xml_texto, re.DOTALL)
+    resultado = xml_texto
+    for a in anchors:
+        m_from = re.search(r'<xdr:from><xdr:col>\d+</xdr:col>.*?<xdr:row>(\d+)</xdr:row>', a, re.DOTALL)
+        if m_from and fila_ini_0idx <= int(m_from.group(1)) <= fila_fin_0idx:
+            resultado = resultado.replace(a, '', 1)
+    return resultado
+
+
+def _anchor_imagen_esquema_xml(id_imagen, col_ini_0idx, col_fin_0idx, fila_ini_0idx, fila_fin_0idx, rid):
+    """Ancla de imagen que se estira para llenar exactamente el rango de
+    celdas indicado (mismo patrón ya probado en _construir_anchor_imagen_xml,
+    pero tomando el rango de columnas directo en vez de un ancho fijo)."""
+    margen = 40000
+    return (
+        f'<xdr:twoCellAnchor editAs="oneCell">'
+        f'<xdr:from><xdr:col>{col_ini_0idx}</xdr:col><xdr:colOff>{margen}</xdr:colOff>'
+        f'<xdr:row>{fila_ini_0idx}</xdr:row><xdr:rowOff>{margen}</xdr:rowOff></xdr:from>'
+        f'<xdr:to><xdr:col>{col_fin_0idx}</xdr:col><xdr:colOff>-{margen}</xdr:colOff>'
+        f'<xdr:row>{fila_fin_0idx}</xdr:row><xdr:rowOff>-{margen}</xdr:rowOff></xdr:to>'
+        f'<xdr:pic>'
+        f'<xdr:nvPicPr><xdr:cNvPr id="{id_imagen}" name="EsquemaZona{id_imagen}"/>'
+        f'<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
+        f'<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="{rid}"/>'
+        f'<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+        f'<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
+        f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+        f'</xdr:pic><xdr:clientData/></xdr:twoCellAnchor>'
+    )
+
+
 def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_span, rid):
     # Margen de seguridad de ~3 milímetros (100000 EMUs) para NO INVADIR las líneas de la tabla
     margen = 100000
@@ -669,6 +705,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
     altura_pagina_actual_pt = _altura_filas_pt(ws, 1, filas_headers_zonas[0] - 1)
     fila_medida_hasta = filas_headers_zonas[0] - 1
     fila_legend_zona_anterior = None
+    ventanas_diagramas = []
 
     for idx_z, bloque_zona in enumerate(estructura_zonas):
         fila_header = filas_headers_zonas[idx_z] + desplazamiento
@@ -697,6 +734,18 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         altura_pagina_actual_pt += altura_tabla_zona_pt
         fila_medida_hasta = fila_legend_zona
         fila_legend_zona_anterior = fila_legend_zona
+
+        # Se guarda la ventana de filas donde vive el esquema de esta zona,
+        # para reemplazarlo más adelante por la imagen plana (evita el
+        # problema de las cajitas de texto vectoriales). Zona 1 se deja
+        # aparte: comparte espacio con la matriz de espesores y tiene un
+        # diseño distinto al resto.
+        if idx_z > 0:
+            ventanas_diagramas.append({
+                "fila_ini": fila_proteccion_inicio,
+                "fila_fin": fila_header - 1,
+                "esquemas": bloque_zona["esquema"],
+            })
 
         for idx_i, item in enumerate(bloque_zona["items"]):
             cod_z, desc_z, tec_def = item
@@ -950,7 +999,54 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
 
     rids_existentes = re.findall(r'Id="rId(\d+)"', drawing1_rels)
     siguiente_rid = max((int(r) for r in rids_existentes), default=0) + 1
-    media_nuevos = {}
+
+    # --- Reemplazar los esquemas vectoriales problemáticos por las imágenes
+    # planas reales (las mismas de imagenes_esquemas/, que ya se usan en la
+    # app). Una imagen plana no tiene cajitas de texto que se puedan
+    # desalinear — resuelve el problema de raíz en vez de seguir ajustando
+    # formas vectoriales una por una. ---
+    anchors_esquemas_xml = ""
+    id_shape_esquema = 8000
+    media_esquemas_pendientes = {}
+    for ventana in ventanas_diagramas:
+        fila_ini_0idx = ventana["fila_ini"] - 1
+        fila_fin_0idx = ventana["fila_fin"] - 1
+        if fila_fin_0idx < fila_ini_0idx:
+            continue
+        drawing1_xml = _quitar_anchors_en_ventana(drawing1_xml, fila_ini_0idx, fila_fin_0idx)
+
+        nombres_png = ventana["esquemas"]
+        n_imgs = len(nombres_png)
+        ancho_total_cols = 18  # A hasta R
+        for idx_img, nombre_png in enumerate(nombres_png):
+            ruta_png = os.path.join("imagenes_esquemas", nombre_png)
+            if not os.path.exists(ruta_png):
+                continue
+            col_ini = int(idx_img * ancho_total_cols / n_imgs)
+            col_fin = int((idx_img + 1) * ancho_total_cols / n_imgs)
+            with open(ruta_png, "rb") as f_img:
+                datos_png = f_img.read()
+            nombre_media = f"esquema{siguiente_rid}.png"
+            rid_actual = f"rId{siguiente_rid}"
+            drawing1_rels = re.sub(
+                r'</([a-zA-Z0-9]+:)?Relationships>',
+                lambda m, nm=nombre_media, rid=rid_actual: f'<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/{nm}" Id="{rid}"/>' + m.group(0),
+                drawing1_rels
+            )
+            anchors_esquemas_xml += _anchor_imagen_esquema_xml(
+                id_shape_esquema, col_ini, col_fin, fila_ini_0idx, fila_fin_0idx + 1, rid_actual
+            )
+            media_esquemas_pendientes[f"xl/media/{nombre_media}"] = datos_png
+            siguiente_rid += 1
+            id_shape_esquema += 1
+
+    drawing1_xml = re.sub(
+        r'</([a-zA-Z0-9]+:)?wsDr>',
+        lambda m: anchors_esquemas_xml + m.group(0),
+        drawing1_xml
+    )
+
+    media_nuevos = dict(media_esquemas_pendientes)
     anchors_nuevos_xml = ""
     id_shape = 9000
 
