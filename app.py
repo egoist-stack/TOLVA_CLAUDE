@@ -385,13 +385,17 @@ def _crear_bloque_foto_nuevo(ws, fila_insercion, alto=8):
             ws.cell(row=r, column=col).border = borde
     return (fila_insercion, fila_insercion + alto - 1)
 
+# Si es True, las fotos verticales se giran 90° para llenar más el recuadro.
+# Por defecto False: la foto se muestra tal cual la tomaste, sin girar ni deformar.
+ROTAR_FOTOS_VERTICALES = False
+
 def _preparar_imagen_para_insertar(imagen_pil):
     img_copia = imagen_pil.copy().convert("RGB")
     # Los recuadros de Panorámico/Detalle son mucho más anchos que altos.
     # Si la foto es vertical (más alta que ancha, típico de una foto de
     # celular sin girar), se gira 90° para que quede horizontal y encaje
     # en el recuadro sin aplastarse/deformarse.
-    if img_copia.height > img_copia.width:
+    if ROTAR_FOTOS_VERTICALES and img_copia.height > img_copia.width:
         img_copia = img_copia.transpose(Image.ROTATE_90)
     img_copia.thumbnail((1200, 1200), Image.LANCZOS)
     buf = io.BytesIO()
@@ -558,6 +562,87 @@ def _construir_anchor_imagen_xml(id_imagen, col_0idx, fila_0idx, col_span, row_s
         f'<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
         f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
         f'</xdr:pic><xdr:clientData/></xdr:twoCellAnchor>'
+    )
+
+
+class _Geometria:
+    """Mide en EMU las columnas y filas REALES de la hoja ya terminada (con
+    las filas insertadas), para poder colocar cada imagen con su proporción
+    original y centrada dentro de su recuadro."""
+    def __init__(self, ws, n_cols=18):
+        self.ws = ws
+        defecto = ws.sheet_format.defaultColWidth or 8.43
+        self.cols = []
+        for c in range(1, n_cols + 1):
+            w = defecto
+            for d in ws.column_dimensions.values():
+                if d.min is not None and d.max is not None and d.min <= c <= d.max and d.width:
+                    w = d.width
+                    break
+            px = int((256 * w + int(128 / 7)) / 256 * 7)  # ancho en píxeles (Calibri 11)
+            self.cols.append(px * 9525)
+        self.alto_defecto = ws.sheet_format.defaultRowHeight or 15
+
+    def _alto_fila(self, r0):
+        d = self.ws.row_dimensions.get(r0 + 1)
+        h = d.height if (d is not None and d.height) else self.alto_defecto
+        return int(h * 12700)
+
+    def x(self, col0):
+        return sum(self.cols[:col0])
+
+    def y(self, fila0):
+        return sum(self._alto_fila(r) for r in range(fila0))
+
+    def col_en(self, x):
+        acc = 0
+        for i, w in enumerate(self.cols):
+            if x < acc + w:
+                return i, int(x - acc)
+            acc += w
+        return len(self.cols) - 1, self.cols[-1] - 1
+
+    def fila_en(self, y):
+        acc, r = 0, 0
+        while True:
+            h = self._alto_fila(r)
+            if y < acc + h:
+                return r, int(y - acc)
+            acc += h
+            r += 1
+
+
+def _anchor_imagen_ajustada_xml(geo, id_imagen, nombre, rid, bytes_img,
+                                col_ini, col_fin, fila_ini, fila_fin, margen=60000):
+    """Coloca la imagen DENTRO del rango [col_ini, col_fin) x [fila_ini, fila_fin)
+    (índices base 0, fin exclusivo) conservando su proporción real, escalada
+    para que entre completa y centrada. Nunca se estira ni se sale del borde."""
+    iw, ih = Image.open(io.BytesIO(bytes_img)).size
+    x0, x1 = geo.x(col_ini), geo.x(col_fin)
+    y0, y1 = geo.y(fila_ini), geo.y(fila_fin)
+    ancho = x1 - x0 - 2 * margen
+    alto = y1 - y0 - 2 * margen
+    if ancho <= 0 or alto <= 0 or iw <= 0 or ih <= 0:
+        return ""
+    esc = min(ancho / iw, alto / ih)
+    cx, cy = int(iw * esc), int(ih * esc)
+    px = x0 + margen + (ancho - cx) // 2
+    py = y0 + margen + (alto - cy) // 2
+    c, c_off = geo.col_en(px)
+    r, r_off = geo.fila_en(py)
+    return (
+        f'<xdr:oneCellAnchor>'
+        f'<xdr:from><xdr:col>{c}</xdr:col><xdr:colOff>{c_off}</xdr:colOff>'
+        f'<xdr:row>{r}</xdr:row><xdr:rowOff>{r_off}</xdr:rowOff></xdr:from>'
+        f'<xdr:ext cx="{cx}" cy="{cy}"/>'
+        f'<xdr:pic>'
+        f'<xdr:nvPicPr><xdr:cNvPr id="{id_imagen}" name="{nombre}{id_imagen}"/>'
+        f'<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>'
+        f'<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="{rid}"/>'
+        f'<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+        f'<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+        f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+        f'</xdr:pic><xdr:clientData/></xdr:oneCellAnchor>'
     )
 
 def obtener_img_state(llave):
@@ -743,7 +828,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         if idx_z > 0:
             ventanas_diagramas.append({
                 "fila_ini": fila_proteccion_inicio,
-                "fila_fin": fila_header - 1,
+                "fila_fin": fila_header - 2,  # la fila de título de la tabla queda libre
                 "esquemas": bloque_zona["esquema"],
             })
 
@@ -815,7 +900,9 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             fila_medida_hasta = punto_insercion - 1
 
             altura_header_pt = 25  # alto fijo del encabezado de fotos
-            if altura_pagina_actual_pt + altura_header_pt > presupuesto_pagina_pt:
+            # El encabezado va junto con al menos el primer bloque de foto
+            # (evita que quede huérfano al final de una página).
+            if altura_pagina_actual_pt + altura_header_pt + 8 * 20 > presupuesto_pagina_pt:
                 ws.row_breaks.append(Break(id=punto_insercion - 1))
                 altura_pagina_actual_pt = 0
 
@@ -884,6 +971,11 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                         "row_span": alto_bloque,
                         "bytes_png": _preparar_imagen_para_insertar(img_pano),
                     })
+
+            # El esquema de la zona siguiente debe empezar DESPUÉS de los
+            # bloques de fotos de esta zona (antes empezaba justo tras la
+            # leyenda y las fotos quedaban tapadas / encima del esquema).
+            fila_legend_zona_anterior = siguiente_fila_libre - 1
 
     # --- ZONAS A REPARAR (OTs) ---
     fila_ot = 148 + desplazamiento
@@ -997,6 +1089,7 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
         altura_emu = int(altura_pt * 12700)  # 1 punto = 12700 EMU
         drawing1_xml = _desplazar_filas_drawing_xml(drawing1_xml, fila_insercion - 1, cantidad, altura_emu)
 
+    geo = _Geometria(ws)
     rids_existentes = re.findall(r'Id="rId(\d+)"', drawing1_rels)
     siguiente_rid = max((int(r) for r in rids_existentes), default=0) + 1
 
@@ -1033,8 +1126,9 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
                 lambda m, nm=nombre_media, rid=rid_actual: f'<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/{nm}" Id="{rid}"/>' + m.group(0),
                 drawing1_rels
             )
-            anchors_esquemas_xml += _anchor_imagen_esquema_xml(
-                id_shape_esquema, col_ini, col_fin, fila_ini_0idx, fila_fin_0idx + 1, rid_actual
+            anchors_esquemas_xml += _anchor_imagen_ajustada_xml(
+                geo, id_shape_esquema, "EsquemaZona", rid_actual, datos_png,
+                col_ini, col_fin, fila_ini_0idx, fila_fin_0idx + 1, margen=40000
             )
             media_esquemas_pendientes[f"xl/media/{nombre_media}"] = datos_png
             siguiente_rid += 1
@@ -1061,8 +1155,10 @@ def generar_reporte_excel(ruta_plantilla, cliente, lugar, fecha_insp, cod_equipo
             drawing1_rels
         )
         
-        anchors_nuevos_xml += _construir_anchor_imagen_xml(
-            id_shape, foto["col_0idx"], foto["fila_0idx"], foto["col_span"], foto["row_span"], rid_actual
+        anchors_nuevos_xml += _anchor_imagen_ajustada_xml(
+            geo, id_shape, "FotoApp", rid_actual, foto["bytes_png"],
+            foto["col_0idx"], foto["col_0idx"] + foto["col_span"],
+            foto["fila_0idx"], foto["fila_0idx"] + foto["row_span"], margen=100000
         )
         siguiente_rid += 1
         id_shape += 1
